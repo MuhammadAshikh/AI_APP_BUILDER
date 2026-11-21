@@ -924,7 +924,6 @@ export default function Home() {
               <span className="brand-name">morrow</span>
             </a>
             <div className="landing-header-actions">
-              <span className="landing-header-note">A little space to make something real.</span>
               {!user && (
                 <button
                   className="landing-signin"
@@ -942,11 +941,7 @@ export default function Home() {
 
           <div className="landing-hero">
             <div className="landing-copy">
-              <div className="landing-eyebrow"><span /> YOUR NEXT IDEA STARTS HERE</div>
               <h1>Dream it.<br /><span>Build it</span> together.</h1>
-              <p className="landing-description">
-                A thought, a few words, a whole new website. Tell Morrow what you have in mind and build it one conversation at a time.
-              </p>
 
               <div className="landing-chat-card">
                 <div className="landing-chat-label">
@@ -993,38 +988,7 @@ export default function Home() {
                 ))}
               </div>
             </div>
-
-            <div className="landing-visual" aria-hidden="true">
-              <div className="landing-orbit orbit-one" />
-              <div className="landing-orbit orbit-two" />
-              <div className="landing-artifact artifact-top"><Sparkles size={13} /><span>Made together</span></div>
-              <div className="landing-preview-card">
-                <div className="landing-browser-bar">
-                  <span /><span /><span />
-                  <div>Live preview</div>
-                </div>
-                <div className="landing-preview-page">
-                  <div className="landing-preview-nav"><span>goodthings.</span><span>WORK&nbsp;&nbsp;&nbsp; ABOUT&nbsp;&nbsp;&nbsp; CONTACT</span></div>
-                  <div className="landing-preview-body">
-                    <span className="landing-preview-kicker">A THOUGHTFUL LITTLE STUDIO</span>
-                    <strong>Good things<br />start somewhere.</strong>
-                    <span className="landing-preview-link">Come on in <ArrowRight size={12} /></span>
-                    <div className="landing-preview-art">
-                      <span /><span /><span />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="landing-artifact artifact-bottom"><span className="landing-artifact-dot" /> Live preview <span>·</span> Yours to shape</div>
-            </div>
           </div>
-
-          <footer className="landing-footer">
-            <div className="landing-footer-promise"><span>01</span> Start with a conversation</div>
-            <div className="landing-footer-promise"><span>02</span> Make it yours, as you go</div>
-            <div className="landing-footer-promise"><span>03</span> See it come to life</div>
-            <div className="landing-stack">Next.js <span>·</span> React <span>·</span> TypeScript <span>·</span> Tailwind</div>
-          </footer>
         </section>
       )}
 
