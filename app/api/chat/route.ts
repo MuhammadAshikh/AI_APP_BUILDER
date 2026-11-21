@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -16,6 +17,28 @@ type ChatRequest = {
 };
 
 export async function POST(request: Request) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const accessToken = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!accessToken) {
+    return NextResponse.json({ error: "Sign in is required to build an app." }, { status: 401 });
+  }
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return NextResponse.json({ error: "Supabase authentication is not configured." }, { status: 503 });
+  }
+  try {
+    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+    const { data, error } = await supabase.auth.getUser(accessToken);
+    if (error || !data.user) {
+      return NextResponse.json({ error: "Your session is invalid or expired. Please sign in again." }, { status: 401 });
+    }
+  } catch (error) {
+    console.error("Could not verify the Supabase session:", error);
+    return NextResponse.json({ error: "Could not verify your session. Please try again." }, { status: 503 });
+  }
+
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   const apiToken = process.env.CLOUDFLARE_API_TOKEN;
   if (!accountId || !apiToken) {
@@ -53,8 +76,8 @@ export async function POST(request: Request) {
   if (messages.reduce((total, message) => total + message.content.length, 0) > 16000) {
     return NextResponse.json({ error: "The conversation is too long to send." }, { status: 413 });
   }
-  if (!Array.isArray(body.files) || body.files.length === 0 || body.files.length > 24) {
-    return NextResponse.json({ error: "Provide between 1 and 24 current project files." }, { status: 400 });
+  if (!Array.isArray(body.files) || body.files.length > 24) {
+    return NextResponse.json({ error: "Provide no more than 24 current project files." }, { status: 400 });
   }
   const validFiles = body.files.every(
     (file): file is ProjectFile =>
@@ -91,14 +114,17 @@ export async function POST(request: Request) {
           messages: [
             {
               role: "system",
-              content: `You are Morrow, an expert senior product engineer and interface designer. First inspect the user's request and current project files. Then build or modify a complete, production-quality Next.js application. Do not produce a generic landing-page template or shallow demo. Use semantic HTML5, Tailwind CSS v4 utilities, CSS3, React/TypeScript interactions, accessible controls, responsive layouts, and realistic product content. Quality requirements:
-- Establish an original, product-specific visual system: restrained palette, deliberate type pairing and scale, consistent spacing, strong hierarchy, and polished surfaces. Avoid default-looking Tailwind demos, generic gradients, and repetitive card grids.
+              content: `You are Morrow, an expert senior product engineer and interface designer. First inspect the user's request and current project files. If the current project files array is empty, this is a brand-new project: create it entirely from scratch and do not reuse sample/template code or content from prior projects. Then build or modify a complete, production-quality Next.js application. Do not produce a generic landing-page template or shallow demo. Use semantic HTML5, Tailwind CSS v4 utilities, CSS3, React/TypeScript interactions, accessible controls, responsive layouts, and realistic product content. Quality requirements:
+- Treat every request as a design problem, not an invitation to fill a familiar layout. Before coding, identify the target user, the job they need to do, and one product-specific idea that could make the experience more useful, memorable, or delightful.
+- Establish a coherent visual direction that fits the product, with deliberate choices for layout, typography, color, spacing, imagery, and motion. Modern does not automatically mean gradients, glass effects, oversized hero text, or rounded-card grids; use these only when they serve the concept. Avoid generic landing-page sections, repeated card grids, stock dashboard patterns, filler copy, and decorative controls.
+- Give the app a useful signature moment: an interaction, visualization, workflow, or content presentation that feels specific to this product. Keep it practical and understandable; originality should make the experience clearer or more engaging, not harder to use.
 - Build complete product experiences, not just hero screens: use realistic copy/data and include the important sections, workflows, and states implied by the request.
 - When a request calls for a multi-page app (or the product clearly needs one), first plan a compact sitemap of 3-5 useful pages. Implement each as a real Next.js App Router route (for example app/products/page.tsx and app/about/page.tsx), not just hidden sections or a single-page mock. Reuse a shared responsive header, navigation, footer, and components; make every nav link point to a generated route and show the current page. Give each route distinct, useful content and page-specific hierarchy while maintaining the same design system. Include the root app/page.tsx and every route's complete source file in "files".
 - In the standalone HTML preview, represent every principal route and make navigation genuinely usable without a server: use hash-based routes, render the correct page for the current hash, and support browser back/forward. Keep the preview's information architecture and visual direction aligned with the generated Next.js routes.
 - Make controls functional, with coherent loading, success, empty, and error states where relevant. No decorative buttons, dead links, href="#", or controls with no behavior.
 - Build desktop and mobile layouts deliberately, with keyboard access, semantic landmarks, clear focus states, and no clipped content or horizontal overflow.
 - Use meaningful visual assets or visualizations when appropriate; never let missing external assets leave blank blocks. Use real, plausible names and copy; never use Lorem Ipsum or "coming soon" placeholders.
+- Before finishing, review the app as a first-time user: confirm its purpose is immediately clear, the next action is obvious, every screen feels like part of the same product, mobile layouts work, and nothing is generic, ornamental, or nonfunctional. In "reply", briefly explain the product-specific idea and key UX choices.
 - Preserve existing behavior and design unless the user asks to change them. For edits, inspect and update existing files rather than replacing working features with a fresh mock.
 - Keep code runnable: check imports, TypeScript/JSX syntax, Next.js route conventions, Tailwind utilities, file paths, and accessibility. Avoid adding dependencies unless needed.
 - Always include package.json, tsconfig.json, next.config.ts, app/layout.tsx, app/page.tsx, app/globals.css, postcss.config.mjs, and supabase/schema.sql. Add only necessary shared components, route files, and supporting assets/configuration.

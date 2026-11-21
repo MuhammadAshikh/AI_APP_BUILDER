@@ -1,41 +1,28 @@
 "use client";
 
 import {
-  ArrowDown,
-  ArrowLeft,
   ArrowRight,
   ArrowUp,
   Check,
-  ChevronDown,
   ChevronRight,
-  CircleHelp,
   Clock3,
   Code2,
-  Command,
   FileCode2,
   Files,
-  FolderPlus,
   Globe2,
-  History,
   LayoutPanelLeft,
   LoaderCircle,
   LockKeyhole,
   LogOut,
   MessageSquare,
-  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
-  Paperclip,
-  Plus,
   RefreshCw,
   Search,
-  Send,
   Smartphone,
-  Settings2,
   Sparkles,
   WandSparkles,
   X,
-  Zap
 } from "lucide-react";
 import {
   FormEvent,
@@ -67,6 +54,17 @@ type Conversation = {
   messages: Message[];
   html?: string;
   files?: ProjectFile[];
+  isNewProject?: boolean;
+};
+
+type ProjectRow = {
+  id: string;
+  title: string;
+  updated_at: string;
+  messages: Message[];
+  html: string | null;
+  files: ProjectFile[];
+  is_new_project: boolean;
 };
 
 type WorkspaceTab = "preview" | "code";
@@ -85,6 +83,14 @@ const formatDate = (date: string) => {
   if (value.toDateString() === yesterday.toDateString()) return "Yesterday";
   return new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(value);
 };
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  return fallback;
+}
 
 const starterMessages: Message[] = [
   {
@@ -376,8 +382,8 @@ function makeMessage(role: Message["role"], content: string): Message {
 
 export default function Home() {
   const [view, setView] = useState<"landing" | "workspace">("landing");
-  const [conversations, setConversations] = useState<Conversation[]>(initialConversations);
-  const [activeId, setActiveId] = useState(initialConversations[0].id);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState("");
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("preview");
   const [prompt, setPrompt] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -392,73 +398,245 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authConfigured, setAuthConfigured] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isCompactLayout, setIsCompactLayout] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [previewWidth, setPreviewWidth] = useState<"desktop" | "mobile">("desktop");
   const [previewVersion, setPreviewVersion] = useState(0);
   const [copied, setCopied] = useState(false);
-  const [historyLoaded, setHistoryLoaded] = useState(false);
-  const [previewCode, setPreviewCode] = useState(previewMarkup);
+  const [authLoaded, setAuthLoaded] = useState(false);
+  const [historyOwnerId, setHistoryOwnerId] = useState<string | null>(null);
+  const [projectsLoadedForUser, setProjectsLoadedForUser] = useState<string | null>(null);
+  const [projectSyncStatus, setProjectSyncStatus] = useState<"loading" | "saving" | "saved" | "error">("loading");
+  const [projectSyncError, setProjectSyncError] = useState("");
+  const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
+  const [projectSaveAttempt, setProjectSaveAttempt] = useState(0);
+  const [previewCode, setPreviewCode] = useState("");
   const [selectedFilePath, setSelectedFilePath] = useState("app/page.tsx");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const landingPromptRef = useRef<HTMLTextAreaElement>(null);
+  const promptInputRef = useRef<HTMLTextAreaElement>(null);
+  const historySearchInputRef = useRef<HTMLInputElement>(null);
+  const projectSaveQueueRef = useRef(Promise.resolve());
+  const savedProjectVersionsRef = useRef(new Map<string, number>());
+  const currentUserIdRef = useRef<string | null>(null);
+  currentUserIdRef.current = user?.id ?? null;
 
   const activeConversation = conversations.find((item) => item.id === activeId);
-  const messages = activeConversation?.messages ?? starterMessages;
-  const projectFiles = activeConversation?.files ?? starterProjectFiles;
+  const messages = activeConversation?.messages ?? [];
+  const projectFiles = activeConversation?.files ?? [];
   const selectedFile = projectFiles.find((file) => file.path === selectedFilePath) ?? projectFiles[0];
 
   useEffect(() => {
     const supabase = getSupabaseClient();
     setAuthConfigured(Boolean(supabase));
-    if (!supabase) return;
+    if (!supabase) {
+      setAuthLoaded(true);
+      return;
+    }
+
+    const applyAuthUser = (nextUser: User | null) => {
+      const nextUserId = nextUser?.id ?? null;
+      if (currentUserIdRef.current !== nextUserId) {
+        setConversations([]);
+        setActiveId("");
+        setHistoryOwnerId(null);
+        setProjectsLoadedForUser(null);
+        savedProjectVersionsRef.current.clear();
+        if (!nextUser) {
+          setView("landing");
+          setPrompt("");
+        }
+      }
+      currentUserIdRef.current = nextUserId;
+      setUser(nextUser);
+      setAuthLoaded(true);
+    };
+
+    let authEventReceived = false;
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      authEventReceived = true;
+      applyAuthUser(session?.user ?? null);
+    });
 
     supabase.auth.getUser().then(({ data, error }) => {
       if (error && error.name !== "AuthSessionMissingError") {
         console.error("Could not read the current Supabase session:", error.message);
       }
-      setUser(data.user);
-    });
-
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
+      if (!authEventReceived) applyAuthUser(data.user);
+      else setAuthLoaded(true);
     });
     return () => data.subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
     try {
-      const saved = window.localStorage.getItem("morrow-conversations");
-      if (saved) {
-        const parsed = JSON.parse(saved) as Conversation[];
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setConversations(parsed);
-          setActiveId(parsed[0].id);
-        }
-      }
+      window.localStorage.removeItem("morrow-conversations");
     } catch (error) {
-      console.error("Could not restore saved conversations:", error);
-    } finally {
-      setHistoryLoaded(true);
+      console.error("Could not remove locally cached projects:", error);
     }
   }, []);
 
   useEffect(() => {
-    if (!historyLoaded) return;
-    try {
-      window.localStorage.setItem("morrow-conversations", JSON.stringify(conversations));
-    } catch (error) {
-      console.error("Could not save conversation history:", error);
+    if (!authLoaded) return;
+    if (!user) {
+      setConversations([]);
+      setActiveId("");
+      setHistoryOwnerId(null);
+      setProjectsLoadedForUser(null);
+      setProjectSyncError("");
+      return;
     }
-  }, [conversations, historyLoaded]);
+
+    let cancelled = false;
+    let realtimeChannel: ReturnType<NonNullable<typeof supabase>["channel"]> | null = null;
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+    const loadProjects = async () => {
+      setProjectSyncStatus("loading");
+      setProjectSyncError("");
+      try {
+        const { data, error } = await supabase
+          .from("projects")
+          .select("id, title, updated_at, messages, html, files, is_new_project")
+          .eq("user_id", user.id)
+          .order("updated_at", { ascending: false });
+        if (error) throw error;
+
+        const cloudRows = (data ?? []) as ProjectRow[];
+        if (cancelled) return;
+        savedProjectVersionsRef.current = new Map(
+          cloudRows.map((project) => [project.id, Date.parse(project.updated_at)])
+        );
+        const restoredProjects: Conversation[] = cloudRows.map((project) => ({
+          id: project.id,
+          title: project.title,
+          updatedAt: project.updated_at,
+          messages: project.messages,
+          html: project.html ?? undefined,
+          files: project.files,
+          isNewProject: project.is_new_project
+        }));
+        setConversations(restoredProjects);
+        setActiveId(restoredProjects[0]?.id ?? "");
+        setHistoryOwnerId(user.id);
+        setProjectsLoadedForUser(user.id);
+        setProjectSyncStatus("saved");
+
+        realtimeChannel = supabase
+          .channel(`projects:${user.id}`)
+          .on(
+            "postgres_changes",
+            { event: "*", schema: "public", table: "projects", filter: `user_id=eq.${user.id}` },
+            (payload) => {
+              if (payload.eventType === "DELETE") {
+                const deleted = payload.old as { id?: string };
+                if (!deleted.id) return;
+                savedProjectVersionsRef.current.delete(deleted.id);
+                setConversations((existing) => existing.filter((project) => project.id !== deleted.id));
+                return;
+              }
+
+              const row = payload.new as ProjectRow;
+              if (!row.id || !row.updated_at) return;
+              const version = Date.parse(row.updated_at);
+              setConversations((existing) => {
+                const current = existing.find((project) => project.id === row.id);
+                if (current && Date.parse(current.updatedAt) >= version) return existing;
+                savedProjectVersionsRef.current.set(row.id, version);
+                const updated: Conversation = {
+                  id: row.id,
+                  title: row.title,
+                  updatedAt: row.updated_at,
+                  messages: row.messages,
+                  html: row.html ?? undefined,
+                  files: row.files,
+                  isNewProject: row.is_new_project
+                };
+                return [updated, ...existing.filter((project) => project.id !== row.id)]
+                  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+              });
+            }
+          )
+          .subscribe((status) => {
+            if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+              console.error(`Supabase project realtime subscription failed: ${status}`);
+            }
+          });
+      } catch (error) {
+        if (cancelled) return;
+        const detail = getErrorMessage(error, "Could not load projects from Supabase.");
+        console.warn("Could not load or import Supabase projects:", error);
+        setProjectSyncError(detail);
+        setProjectSyncStatus("error");
+      }
+    };
+
+    void loadProjects();
+    return () => {
+      cancelled = true;
+      if (realtimeChannel) void supabase.removeChannel(realtimeChannel);
+    };
+  }, [authLoaded, projectLoadAttempt, user]);
+
+  useEffect(() => {
+    if (!user || historyOwnerId !== user.id || projectsLoadedForUser !== user.id) return;
+    const projects = conversations.filter(
+      (project) => savedProjectVersionsRef.current.get(project.id) !== Date.parse(project.updatedAt)
+    );
+    if (projects.length === 0) return;
+
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+    const userId = user.id;
+    const rows = projects.map((project) => ({
+      id: project.id,
+      user_id: userId,
+      title: project.title,
+      updated_at: project.updatedAt,
+      messages: project.messages,
+      html: project.html ?? null,
+      files: project.files ?? [],
+      is_new_project: project.isNewProject ?? false
+    }));
+
+    setProjectSyncStatus("saving");
+    const timer = window.setTimeout(() => {
+      projectSaveQueueRef.current = projectSaveQueueRef.current
+        .then(async () => {
+          const { error } = await supabase.from("projects").upsert(rows, { onConflict: "user_id,id" });
+          if (error) throw error;
+          rows.forEach((row) => savedProjectVersionsRef.current.set(row.id, Date.parse(row.updated_at)));
+          if (currentUserIdRef.current === userId) {
+            setProjectSyncStatus("saved");
+            setProjectSyncError("");
+          }
+        })
+        .catch((error: unknown) => {
+          const detail = getErrorMessage(error, "Could not save projects to Supabase.");
+          console.warn("Could not save Supabase projects:", error);
+          if (currentUserIdRef.current === userId) {
+            setProjectSyncError(detail);
+            setProjectSyncStatus("error");
+          }
+        });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [conversations, historyOwnerId, projectSaveAttempt, projectsLoadedForUser, user]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isSending]);
 
   useEffect(() => {
-    setPreviewCode(activeConversation?.html ?? previewMarkup);
-    setSelectedFilePath(activeConversation?.files?.[0]?.path ?? starterProjectFiles[2].path);
-  }, [activeId, activeConversation?.html, activeConversation?.files]);
+    setPreviewCode(activeConversation?.html ?? "");
+    setSelectedFilePath(activeConversation?.files?.[0]?.path ?? "app/page.tsx");
+  }, [activeId, activeConversation?.html, activeConversation?.files, activeConversation?.isNewProject]);
+
+  useEffect(() => {
+    if (projectFiles.length === 0 && activeTab === "code") {
+      setActiveTab("preview");
+    }
+  }, [activeTab, projectFiles.length]);
 
   const openLandingChat = useCallback(() => {
     setLandingPrompt("");
@@ -470,16 +648,58 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 860px)");
+    let compact = false;
+    const updateLayout = () => {
+      if (mediaQuery.matches !== compact) {
+        compact = mediaQuery.matches;
+        setSidebarOpen(!compact);
+      }
+      setIsCompactLayout(compact);
+    };
+
+    updateLayout();
+    mediaQuery.addEventListener("change", updateLayout);
+    return () => mediaQuery.removeEventListener("change", updateLayout);
+  }, []);
+
+  const requireSignIn = useCallback(() => {
+    if (user) return true;
+    setAuthMode("signin");
+    setAuthMessage(
+      authConfigured
+        ? "Sign in to build and save your project. Your idea will stay in the prompt."
+        : "Configure Supabase authentication before starting a project."
+    );
+    setIsAuthOpen(true);
+    return false;
+  }, [authConfigured, user]);
+
+  useEffect(() => {
     const handleNewProjectShortcut = (event: globalThis.KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         openLandingChat();
+        return;
+      }
+
+      const target = event.target;
+      const isEditing = target instanceof HTMLElement &&
+        (target.isContentEditable || ["INPUT", "TEXTAREA"].includes(target.tagName));
+      if (event.key === "/" && !isEditing) {
+        event.preventDefault();
+        historySearchInputRef.current?.focus();
+      } else if (event.key === "Escape" && isCompactLayout && sidebarOpen) {
+        setSidebarOpen(false);
+      } else if (event.key === "Escape" && document.activeElement === historySearchInputRef.current) {
+        setHistorySearch("");
+        historySearchInputRef.current?.blur();
       }
     };
 
     window.addEventListener("keydown", handleNewProjectShortcut);
     return () => window.removeEventListener("keydown", handleNewProjectShortcut);
-  }, [openLandingChat]);
+  }, [isCompactLayout, openLandingChat, sidebarOpen]);
 
   useEffect(() => {
     if (view === "landing") {
@@ -488,12 +708,14 @@ export default function Home() {
   }, [view]);
 
   const createConversation = useCallback(() => {
+    if (!requireSignIn()) return null;
     const conversation: Conversation = {
       id: crypto.randomUUID(),
       title: "Untitled project",
       updatedAt: now(),
-      messages: [...starterMessages],
-      files: starterProjectFiles
+      messages: [],
+      files: [],
+      isNewProject: true
     };
     setConversations((existing) => [conversation, ...existing]);
     setActiveId(conversation.id);
@@ -501,11 +723,12 @@ export default function Home() {
     setView("workspace");
     setPrompt("");
     return conversation.id;
-  }, []);
+  }, [requireSignIn]);
 
   const sendMessage = async (messageText?: string, targetConversationId?: string) => {
     const text = (messageText ?? prompt).trim();
     if (!text || isSending) return;
+    if (!requireSignIn()) return;
 
     let conversationId = targetConversationId ?? activeId;
     const targetConversation = conversations.find((item) => item.id === conversationId);
@@ -517,13 +740,15 @@ export default function Home() {
         title: text.length > 34 ? `${text.slice(0, 34)}…` : text,
         updatedAt: now(),
         messages: [],
-        files: starterProjectFiles
+        files: [],
+        isNewProject: true
       };
       setConversations((existing) => [fresh, ...existing]);
       setActiveId(conversationId);
     }
 
-    const currentFiles = targetConversation?.files ?? (targetConversationId ? starterProjectFiles : projectFiles);
+    const currentFiles =
+      targetConversation?.files ?? (targetConversationId || shouldCreateConversation ? [] : projectFiles);
     const message = makeMessage("user", text);
     const id = conversationId;
     setConversations((existing) =>
@@ -544,9 +769,17 @@ export default function Home() {
     setIsSending(true);
 
     try {
+      const supabase = getSupabaseClient();
+      if (!supabase) throw new Error("Supabase authentication is not configured.");
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session) throw new Error("Sign in is required to build and save projects.");
       const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`
+        },
         body: JSON.stringify({
           files: currentFiles,
           messages: [
@@ -588,7 +821,7 @@ export default function Home() {
       const detail = error instanceof Error ? error.message : "Something went wrong.";
       const reply = makeMessage(
         "assistant",
-        `${detail} You can still explore the sample project in Preview, or configure the AI settings in the project environment.`
+        `${detail} You can revise your request and try again, or configure the AI settings in the project environment.`
       );
       setConversations((existing) =>
         existing.map((item) =>
@@ -603,11 +836,16 @@ export default function Home() {
   };
 
   const startProjectFromLanding = (idea = landingPrompt) => {
-    const conversationId = createConversation();
-    setLandingPrompt("");
-    if (idea.trim()) {
-      void sendMessage(idea, conversationId);
+    const initialPrompt = idea.trim();
+    if (!initialPrompt) {
+      landingPromptRef.current?.focus();
+      return;
     }
+    if (!requireSignIn()) return;
+    const conversationId = createConversation();
+    if (!conversationId) return;
+    setLandingPrompt("");
+    void sendMessage(initialPrompt, conversationId);
   };
 
   const onPromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -687,19 +925,18 @@ export default function Home() {
             </a>
             <div className="landing-header-actions">
               <span className="landing-header-note">A little space to make something real.</span>
-              <button
-                className="landing-signin"
-                onClick={() => {
-                  setAuthMode("signin");
-                  setAuthMessage("");
-                  setIsAuthOpen(true);
-                }}
-              >
-                Sign in
-              </button>
-              <button className="landing-header-cta" onClick={openLandingChat}>
-                New project <ArrowRight size={14} />
-              </button>
+              {!user && (
+                <button
+                  className="landing-signin"
+                  onClick={() => {
+                    setAuthMode("signin");
+                    setAuthMessage("");
+                    setIsAuthOpen(true);
+                  }}
+                >
+                  Sign in
+                </button>
+              )}
             </div>
           </header>
 
@@ -726,14 +963,23 @@ export default function Home() {
                       startProjectFromLanding();
                     }
                   }}
-                  placeholder="I want to make a site for..."
+                  placeholder={user ? "Describe the website or app you want to make..." : "Write your idea here. Sign in to build and save it."}
                   aria-label="Describe your new project"
                   rows={3}
                 />
                 <div className="landing-chat-footer">
-                  <span><Sparkles size={12} /> Your idea can change as you go</span>
-                  <button onClick={() => startProjectFromLanding()}>
-                    Start building <ArrowRight size={14} />
+                  <span>
+                    <Sparkles size={12} />
+                    {user
+                      ? landingPrompt.trim() ? "You can refine it as you go" : "Describe an idea to get started"
+                      : "Your idea stays here while you sign in"}
+                  </span>
+                  <button
+                    disabled={!landingPrompt.trim()}
+                    title={!landingPrompt.trim() ? "Add an idea to enable building." : undefined}
+                    onClick={() => startProjectFromLanding()}
+                  >
+                    {user ? "Start building" : "Sign in to start"} <ArrowRight size={14} />
                   </button>
                 </div>
               </div>
@@ -788,6 +1034,8 @@ export default function Home() {
           <button
             className="icon-button sidebar-toggle"
             aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+            aria-expanded={sidebarOpen}
+            aria-controls="projects-navigation"
             onClick={() => setSidebarOpen((open) => !open)}
           >
             {sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
@@ -798,9 +1046,39 @@ export default function Home() {
           </a>
         </div>
         <div className="topbar-right">
-          <span className="save-status"><span /> All changes saved</span>
+          <span
+            className={`save-status ${projectSyncStatus === "error" ? "sync-error" : ""}`}
+            role="status"
+            title={projectSyncError || undefined}
+          >
+            <span />
+            <span className="save-status-label">
+              {!user
+                ? "Sign in to sync projects"
+                : projectSyncStatus === "loading"
+                  ? "Loading projects…"
+                  : projectSyncStatus === "saving"
+                    ? "Saving to Supabase…"
+                    : projectSyncStatus === "error"
+                      ? `Sync failed: ${projectSyncError}`
+                      : "Saved to Supabase"}
+            </span>
+            {user && projectSyncStatus === "error" && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (historyOwnerId === user.id) {
+                    setProjectSaveAttempt((attempt) => attempt + 1);
+                  } else {
+                    setProjectLoadAttempt((attempt) => attempt + 1);
+                  }
+                }}
+              >
+                Retry
+              </button>
+            )}
+          </span>
           <span className="topbar-divider hide-small" />
-          <button className="help-button" aria-label="Help"><CircleHelp size={16} /></button>
           {user ? (
             <div className="account-chip">
               <span className="avatar">{(user.email?.[0] ?? "M").toUpperCase()}</span>
@@ -826,26 +1104,17 @@ export default function Home() {
 
       <div className={`studio-layout ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
         {sidebarOpen && (
-          <aside className="sidebar">
-            <button
-              className="new-project-button"
-              onClick={openLandingChat}
-            >
-              <Plus size={16} strokeWidth={2.2} /> New project
-              <span className="shortcut"><Command size={10} /> K</span>
-            </button>
-
+          <aside className="sidebar" id="projects-navigation" aria-label="Project navigation">
             <div className="sidebar-section-heading">
-              <span>Your space</span><MoreHorizontal size={17} />
+              <span>Your projects</span>
             </div>
-            <button className="sidebar-link active-link"><LayoutPanelLeft size={15} /> My projects</button>
-            <button className="sidebar-link"><Files size={15} /> Templates <span className="link-count">12</span></button>
 
             <div className="history-heading">
-              <div className="sidebar-section-heading"><span>Recent projects</span><button aria-label="New project" onClick={openLandingChat}><Plus size={15} /></button></div>
+              <div className="sidebar-section-heading"><span>Recent projects</span></div>
               <label className="history-search">
                 <Search size={14} />
                 <input
+                  ref={historySearchInputRef}
                   type="search"
                   placeholder="Find a project..."
                   value={historySearch}
@@ -862,22 +1131,34 @@ export default function Home() {
                     <button
                       className={`conversation-item ${conversation.id === activeId ? "selected" : ""}`}
                       key={conversation.id}
-                      onClick={() => setActiveId(conversation.id)}
+                      onClick={() => {
+                        setActiveId(conversation.id);
+                        if (isCompactLayout) setSidebarOpen(false);
+                      }}
                     >
                       <MessageSquare size={14} />
                       <span>{conversation.title}</span>
-                      <MoreHorizontal className="conversation-more" size={15} />
                     </button>
                   ))}
                 </div>
               ))}
               {filteredConversations.length === 0 && (
-                <div className="no-results">No projects found.</div>
+                <div className="no-results">
+                  {historySearch ? (
+                    <>
+                      <span>No projects match “{historySearch}”.</span>
+                      <button onClick={() => setHistorySearch("")}>Clear search</button>
+                    </>
+                  ) : projectSyncStatus === "loading" ? (
+                    "Loading your projects…"
+                  ) : (
+                    "Your projects will appear here."
+                  )}
+                </div>
               )}
             </div>
 
             <div className="sidebar-bottom">
-              <button className="sidebar-link bottom-link"><Settings2 size={15} /> Settings</button>
               {!user && (
                 <button
                   className="profile-link"
@@ -896,14 +1177,20 @@ export default function Home() {
           </aside>
         )}
 
+        {isCompactLayout && sidebarOpen && (
+          <button
+            className="sidebar-scrim"
+            aria-label="Close projects navigation"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+
         <section className="chat-pane">
           <div className="project-titlebar">
             <div className="project-title">
               <div className="project-icon"><WandSparkles size={15} /></div>
-              <span>{activeConversation?.title ?? "A landing page for Studio North"}</span>
-              <ChevronDown size={14} className="title-chevron" />
+              <span>{activeConversation?.title ?? "Choose a project"}</span>
             </div>
-            <button className="icon-button project-menu" aria-label="Project options"><MoreHorizontal size={18} /></button>
           </div>
 
           <div className="chat-content">
@@ -922,7 +1209,13 @@ export default function Home() {
                     "A simple dashboard for my side project",
                     "A landing page for a new coffee shop"
                   ].map((suggestion) => (
-                    <button key={suggestion} onClick={() => setPrompt(suggestion)}>
+                    <button
+                      key={suggestion}
+                      onClick={() => {
+                        setPrompt(suggestion);
+                        window.requestAnimationFrame(() => promptInputRef.current?.focus());
+                      }}
+                    >
                       <Sparkles size={13} /> {suggestion} <ArrowRight size={13} />
                     </button>
                   ))}
@@ -944,15 +1237,21 @@ export default function Home() {
                     {message.role === "assistant" && index === messages.length - 1 && (
                       <div className="assistant-actions">
                         <button onClick={() => setActiveTab("preview")}><Globe2 size={13} /> View preview <ArrowRight size={12} /></button>
-                        <button aria-label="Copy response" onClick={() => void navigator.clipboard.writeText(message.content)}><Files size={13} /></button>
-                        <button aria-label="Regenerate response" onClick={() => setPrompt("Can you refine the last response?")}><RefreshCw size={13} /></button>
+                        <button aria-label="Copy response" title="Copy response" onClick={() => void navigator.clipboard.writeText(message.content)}><Files size={13} /></button>
+                        <button
+                          aria-label="Ask Morrow to refine this build"
+                          title="Ask Morrow to refine this build"
+                          onClick={() => void sendMessage("Refine the current build while keeping its existing direction.")}
+                        >
+                          <RefreshCw size={13} />
+                        </button>
                       </div>
                     )}
                   </div>
                 </article>
               ))}
               {isSending && (
-                <div className="thinking-row">
+                <div className="thinking-row" role="status" aria-live="polite">
                   <div className="assistant-avatar"><span className="brand-mark small"><span /></span></div>
                   <div className="thinking-bubble"><span /><span /><span /></div>
                   <span>Thinking it through</span>
@@ -965,20 +1264,19 @@ export default function Home() {
           <div className="composer-wrap">
             <div className="composer">
               <textarea
+                ref={promptInputRef}
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 onKeyDown={onPromptKeyDown}
-                placeholder="Tell me what you're dreaming up..."
+                placeholder="Describe a change or tell me what to build…"
                 rows={2}
                 aria-label="Describe what you want to build"
               />
               <div className="composer-footer">
                 <div className="composer-tools">
-                  <button className="composer-tool" aria-label="Attach a file"><Paperclip size={15} /><span>Attach</span></button>
-                  <span className="composer-separator" />
-                  <button className="model-select"><Sparkles size={13} /> Morrow AI <ChevronDown size={12} /></button>
+                  <span className="model-badge"><Sparkles size={13} /> Morrow AI</span>
                 </div>
-                <div className="send-controls"><span className="enter-hint">↵ to send</span>
+                <div className="send-controls"><span className="enter-hint">Enter to send · Shift+Enter for a new line</span>
                   <button
                     className={`send-button ${prompt.trim() ? "ready" : ""}`}
                     onClick={() => void sendMessage()}
@@ -1006,6 +1304,8 @@ export default function Home() {
               <button
                 role="tab"
                 aria-selected={activeTab === "code"}
+                disabled={projectFiles.length === 0}
+                title={!projectFiles.length ? "Build a project to browse its source files." : undefined}
                 className={`workbench-tab ${activeTab === "code" ? "tab-active" : ""}`}
                 onClick={() => setActiveTab("code")}
               ><Code2 size={14} /> Code</button>
@@ -1014,11 +1314,19 @@ export default function Home() {
               <button
                 className="icon-button refresh-preview"
                 aria-label="Refresh preview"
+                disabled={!activeConversation?.html}
                 onClick={() => setPreviewVersion((version) => version + 1)}
               >
                 <RefreshCw size={15} />
               </button>
-              <button className="publish-button"><Zap size={13} /> Publish</button>
+              <button
+                className="publish-button"
+                disabled
+                aria-label="Publish (not available yet)"
+                title="Publishing is not configured for this workspace."
+              >
+                Publish
+              </button>
             </div>
           </div>
 
@@ -1026,19 +1334,26 @@ export default function Home() {
             <div className="preview-stage">
               <div className="preview-toolbar">
                 <div className="viewport-controls">
-                  <button className={previewWidth === "desktop" ? "viewport-active" : ""} onClick={() => setPreviewWidth("desktop")} aria-label="Desktop preview"><LayoutPanelLeft size={14} /></button>
-                  <button className={previewWidth === "mobile" ? "viewport-active" : ""} onClick={() => setPreviewWidth("mobile")} aria-label="Mobile preview"><Smartphone size={13} /></button>
+                  <button className={previewWidth === "desktop" ? "viewport-active" : ""} onClick={() => setPreviewWidth("desktop")} aria-label="Desktop preview" aria-pressed={previewWidth === "desktop"}><LayoutPanelLeft size={14} /></button>
+                  <button className={previewWidth === "mobile" ? "viewport-active" : ""} onClick={() => setPreviewWidth("mobile")} aria-label="Mobile preview" aria-pressed={previewWidth === "mobile"}><Smartphone size={13} /></button>
                 </div>
               </div>
               <div className="preview-canvas">
                 <div className={`preview-device ${previewWidth === "mobile" ? "mobile-device" : ""}`}>
-                  <iframe
-                    key={previewVersion}
-                    title="Live site preview"
-                    srcDoc={previewCode}
-                    sandbox="allow-scripts"
-                    className="preview-frame"
-                  />
+                  {!activeConversation?.html ? (
+                    <div className="preview-empty">
+                      <Sparkles size={17} />
+                      <span>{isSending ? "Creating your first build…" : "Your preview will appear here."}</span>
+                    </div>
+                  ) : (
+                    <iframe
+                      key={previewVersion}
+                      title="Live site preview"
+                      srcDoc={previewCode}
+                      sandbox="allow-scripts"
+                      className="preview-frame"
+                    />
+                  )}
                 </div>
               </div>
             </div>
@@ -1069,11 +1384,12 @@ export default function Home() {
             </div>
           )}
           <div className="workbench-footer">
-            <span><span className="live-dot" /> Preview is live</span>
-            <span><Clock3 size={12} /> Updated just now</span>
+            <span>
+              <span className="live-dot" />
+              {activeConversation?.html ? "Preview is ready" : isSending ? "Building preview…" : "Waiting for your first build"}
+            </span>
+            <span><Clock3 size={12} />{activeConversation?.updatedAt ? `Updated ${formatTime(activeConversation.updatedAt)}` : "No build yet"}</span>
             <span className="footer-spacer" />
-            <button aria-label="Open preview help"><CircleHelp size={13} /></button>
-            <button aria-label="Preview options"><MoreHorizontal size={16} /></button>
           </div>
         </section>
       </div>
