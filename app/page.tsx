@@ -92,6 +92,26 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function cleanPlanText(plan: string): string {
+  return plan
+    .replace(/^```(?:markdown|md)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .replace(/^[*-]{3}\s*$/gm, "")
+    .trim();
+}
+
+function keepPreviewNavigationLocal(html: string): string {
+  return html
+    .replace(
+      /(<a\b[^>]*\bhref\s*=\s*)(["'])\/(?!\/)([^"']*)\2/gi,
+      (_match, prefix: string, quote: string, path: string) => `${prefix}${quote}#/${path}${quote}`
+    )
+    .replace(
+      /(<form\b[^>]*\baction\s*=\s*)(["'])\/(?!\/)([^"']*)\2/gi,
+      (_match, prefix: string, quote: string, path: string) => `${prefix}${quote}#/${path}${quote}`
+    );
+}
+
 const starterMessages: Message[] = [
   {
     id: "starter-note",
@@ -398,6 +418,7 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authConfigured, setAuthConfigured] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [landingSidebarOpen, setLandingSidebarOpen] = useState(false);
   const [isCompactLayout, setIsCompactLayout] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [previewWidth, setPreviewWidth] = useState<"desktop" | "mobile">("desktop");
@@ -412,6 +433,8 @@ export default function Home() {
   const [projectSaveAttempt, setProjectSaveAttempt] = useState(0);
   const [previewCode, setPreviewCode] = useState("");
   const [selectedFilePath, setSelectedFilePath] = useState("app/page.tsx");
+  const [pendingPlan, setPendingPlan] = useState<{ conversationId: string; request: string; plan: string } | null>(null);
+  const [planningMode, setPlanningMode] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const landingPromptRef = useRef<HTMLTextAreaElement>(null);
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
@@ -470,7 +493,7 @@ export default function Home() {
 
   useEffect(() => {
     try {
-      window.localStorage.removeItem("morrow-conversations");
+      window.localStorage.removeItem("hamshake-conversations");
     } catch (error) {
       console.error("Could not remove locally cached projects:", error);
     }
@@ -689,6 +712,8 @@ export default function Home() {
       if (event.key === "/" && !isEditing) {
         event.preventDefault();
         historySearchInputRef.current?.focus();
+      } else if (event.key === "Escape" && view === "landing" && landingSidebarOpen) {
+        setLandingSidebarOpen(false);
       } else if (event.key === "Escape" && isCompactLayout && sidebarOpen) {
         setSidebarOpen(false);
       } else if (event.key === "Escape" && document.activeElement === historySearchInputRef.current) {
@@ -699,13 +724,17 @@ export default function Home() {
 
     window.addEventListener("keydown", handleNewProjectShortcut);
     return () => window.removeEventListener("keydown", handleNewProjectShortcut);
-  }, [isCompactLayout, openLandingChat, sidebarOpen]);
+  }, [isCompactLayout, landingSidebarOpen, openLandingChat, sidebarOpen, view]);
 
   useEffect(() => {
     if (view === "landing") {
       window.requestAnimationFrame(() => landingPromptRef.current?.focus());
     }
   }, [view]);
+
+  useEffect(() => {
+    if (!user) setLandingSidebarOpen(false);
+  }, [user]);
 
   const createConversation = useCallback(() => {
     if (!requireSignIn()) return null;
@@ -725,7 +754,11 @@ export default function Home() {
     return conversation.id;
   }, [requireSignIn]);
 
-  const sendMessage = async (messageText?: string, targetConversationId?: string) => {
+  const sendMessage = async (
+    messageText?: string,
+    targetConversationId?: string,
+    mode: "plan" | "build" = "build"
+  ) => {
     const text = (messageText ?? prompt).trim();
     if (!text || isSending) return;
     if (!requireSignIn()) return;
@@ -782,6 +815,7 @@ export default function Home() {
         },
         body: JSON.stringify({
           files: currentFiles,
+          mode,
           messages: [
             ...(targetConversation?.messages ?? [])
               .filter((item) => item.id !== "starter-note" && item.id !== "starter-prompt")
@@ -795,8 +829,29 @@ export default function Home() {
         reply?: string;
         html?: string;
         files?: ProjectFile[];
+        plan?: string;
         error?: string;
       };
+      if (!response.ok) {
+        throw new Error(result.error ?? "The assistant could not respond. Please try again.");
+      }
+      if (mode === "plan") {
+        if (!result.reply || !result.plan) {
+          throw new Error(result.error ?? "The assistant could not create a plan.");
+        }
+        const reply = makeMessage("assistant", result.reply);
+        setPendingPlan({ conversationId: id, request: text, plan: result.plan });
+        setConversations((existing) =>
+          existing.map((item) =>
+            item.id === id
+              ? { ...item, updatedAt: now(), messages: [...item.messages, reply] }
+              : item
+          )
+        );
+        setActiveTab("preview");
+        setIsSending(false);
+        return;
+      }
       if (!response.ok || !result.reply || !result.html || !result.files?.length) {
         throw new Error(result.error ?? "The assistant could not respond. Please try again.");
       }
@@ -845,13 +900,15 @@ export default function Home() {
     const conversationId = createConversation();
     if (!conversationId) return;
     setLandingPrompt("");
-    void sendMessage(initialPrompt, conversationId);
+    void sendMessage(initialPrompt, conversationId, "plan");
   };
 
   const onPromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void sendMessage();
+      const mode = planningMode ? "plan" : "build";
+      setPlanningMode(false);
+      void sendMessage(undefined, undefined, mode);
     }
   };
 
@@ -904,6 +961,87 @@ export default function Home() {
     },
     {}
   );
+  const renderProjectsNavigation = (landing = false) => (
+    <aside
+      className={`sidebar${landing ? " landing-sidebar" : ""}`}
+      id={landing ? "landing-projects-navigation" : "projects-navigation"}
+      aria-label="Project navigation"
+    >
+      <div className="sidebar-section-heading">
+        <span>Your projects</span>
+      </div>
+
+      <div className="history-heading">
+        <div className="sidebar-section-heading"><span>Recent projects</span></div>
+        <label className="history-search">
+          <Search size={14} />
+          <input
+            ref={landing ? undefined : historySearchInputRef}
+            type="search"
+            placeholder="Find a project..."
+            value={historySearch}
+            onChange={(event) => setHistorySearch(event.target.value)}
+          />
+          <span>/</span>
+        </label>
+      </div>
+      <div className="conversation-list">
+        {Object.entries(groupedConversations).map(([group, entries]) => (
+          <div className="conversation-group" key={group}>
+            <div className="group-label">{group}</div>
+            {entries.map((conversation) => (
+              <button
+                className={`conversation-item ${conversation.id === activeId ? "selected" : ""}`}
+                key={conversation.id}
+                onClick={() => {
+                  setActiveId(conversation.id);
+                  if (landing) {
+                    setView("workspace");
+                    setLandingSidebarOpen(false);
+                  }
+                  if (isCompactLayout) setSidebarOpen(false);
+                }}
+              >
+                <MessageSquare size={14} />
+                <span>{conversation.title}</span>
+              </button>
+            ))}
+          </div>
+        ))}
+        {filteredConversations.length === 0 && (
+          <div className="no-results">
+            {historySearch ? (
+              <>
+                <span>No projects match “{historySearch}”.</span>
+                <button onClick={() => setHistorySearch("")}>Clear search</button>
+              </>
+            ) : projectSyncStatus === "loading" ? (
+              "Loading your projects…"
+            ) : (
+              "Your projects will appear here."
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="sidebar-bottom">
+        {!user && (
+          <button
+            className="profile-link"
+            onClick={() => {
+              setAuthMode("signup");
+              setAuthMessage("");
+              setIsAuthOpen(true);
+            }}
+          >
+            <span className="avatar guest-avatar">M</span>
+            <span><strong>Your account</strong><small>{authConfigured ? "Create your free account" : "Sign-in setup available"}</small></span>
+            <ChevronRight size={14} />
+          </button>
+        )}
+      </div>
+    </aside>
+  );
   const copyCode = async () => {
     try {
       await navigator.clipboard.writeText(selectedFile?.content ?? "");
@@ -919,9 +1057,20 @@ export default function Home() {
       {view === "landing" && (
         <section className="landing-page">
           <header className="landing-header">
-            <a className="brand-lockup" href="/" aria-label="Morrow home">
+            {user && (
+              <button
+                className="icon-button sidebar-toggle landing-sidebar-toggle"
+                aria-label={landingSidebarOpen ? "Close projects navigation" : "Open projects navigation"}
+                aria-expanded={landingSidebarOpen}
+                aria-controls="landing-projects-navigation"
+                onClick={() => setLandingSidebarOpen((open) => !open)}
+              >
+                {landingSidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
+              </button>
+            )}
+            <a className="brand-lockup" href="/" aria-label="Hamshake home">
               <span className="brand-mark"><span /></span>
-              <span className="brand-name">morrow</span>
+              <span className="brand-name">Hamshake</span>
             </a>
             <div className="landing-header-actions">
               {!user && (
@@ -938,16 +1087,22 @@ export default function Home() {
               )}
             </div>
           </header>
+          {user && landingSidebarOpen && (
+            <>
+              {renderProjectsNavigation(true)}
+              <button
+                className="landing-sidebar-scrim"
+                aria-label="Close projects navigation"
+                onClick={() => setLandingSidebarOpen(false)}
+              />
+            </>
+          )}
 
           <div className="landing-hero">
             <div className="landing-copy">
               <h1>Dream it.<br /><span>Build it</span> together.</h1>
 
               <div className="landing-chat-card">
-                <div className="landing-chat-label">
-                  <span><MessageSquare size={14} /> A fresh project, in your words</span>
-                  <span>CHAT</span>
-                </div>
                 <textarea
                   ref={landingPromptRef}
                   value={landingPrompt}
@@ -958,16 +1113,15 @@ export default function Home() {
                       startProjectFromLanding();
                     }
                   }}
-                  placeholder={user ? "Describe the website or app you want to make..." : "Write your idea here. Sign in to build and save it."}
+                  placeholder={user ? "Describe the website or app you want to make..." : "Describe the website or app you want to make..."}
                   aria-label="Describe your new project"
                   rows={3}
                 />
                 <div className="landing-chat-footer">
                   <span>
-                    <Sparkles size={12} />
                     {user
                       ? landingPrompt.trim() ? "You can refine it as you go" : "Describe an idea to get started"
-                      : "Your idea stays here while you sign in"}
+                      : "Describe an idea to get started"}
                   </span>
                   <button
                     disabled={!landingPrompt.trim()}
@@ -1004,9 +1158,9 @@ export default function Home() {
           >
             {sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
           </button>
-          <a className="brand-lockup" href="/" aria-label="Morrow home">
+          <a className="brand-lockup" href="/" aria-label="Hamshake home">
             <span className="brand-mark"><span /></span>
-            <span className="brand-name">morrow</span>
+            <span className="brand-name">Hamshake</span>
           </a>
         </div>
         <div className="topbar-right">
@@ -1067,79 +1221,7 @@ export default function Home() {
       </header>
 
       <div className={`studio-layout ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
-        {sidebarOpen && (
-          <aside className="sidebar" id="projects-navigation" aria-label="Project navigation">
-            <div className="sidebar-section-heading">
-              <span>Your projects</span>
-            </div>
-
-            <div className="history-heading">
-              <div className="sidebar-section-heading"><span>Recent projects</span></div>
-              <label className="history-search">
-                <Search size={14} />
-                <input
-                  ref={historySearchInputRef}
-                  type="search"
-                  placeholder="Find a project..."
-                  value={historySearch}
-                  onChange={(event) => setHistorySearch(event.target.value)}
-                />
-                <span>/</span>
-              </label>
-            </div>
-            <div className="conversation-list">
-              {Object.entries(groupedConversations).map(([group, entries]) => (
-                <div className="conversation-group" key={group}>
-                  <div className="group-label">{group}</div>
-                  {entries.map((conversation) => (
-                    <button
-                      className={`conversation-item ${conversation.id === activeId ? "selected" : ""}`}
-                      key={conversation.id}
-                      onClick={() => {
-                        setActiveId(conversation.id);
-                        if (isCompactLayout) setSidebarOpen(false);
-                      }}
-                    >
-                      <MessageSquare size={14} />
-                      <span>{conversation.title}</span>
-                    </button>
-                  ))}
-                </div>
-              ))}
-              {filteredConversations.length === 0 && (
-                <div className="no-results">
-                  {historySearch ? (
-                    <>
-                      <span>No projects match “{historySearch}”.</span>
-                      <button onClick={() => setHistorySearch("")}>Clear search</button>
-                    </>
-                  ) : projectSyncStatus === "loading" ? (
-                    "Loading your projects…"
-                  ) : (
-                    "Your projects will appear here."
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="sidebar-bottom">
-              {!user && (
-                <button
-                  className="profile-link"
-                  onClick={() => {
-                    setAuthMode("signup");
-                    setAuthMessage("");
-                    setIsAuthOpen(true);
-                  }}
-                >
-                  <span className="avatar guest-avatar">M</span>
-                  <span><strong>Your account</strong><small>{authConfigured ? "Create your free account" : "Sign-in setup available"}</small></span>
-                  <ChevronRight size={14} />
-                </button>
-              )}
-            </div>
-          </aside>
-        )}
+        {sidebarOpen && renderProjectsNavigation()}
 
         {isCompactLayout && sidebarOpen && (
           <button
@@ -1162,11 +1244,77 @@ export default function Home() {
               <span className="context-icon"><Sparkles size={13} /></span>
               <span>Building something thoughtful, together.</span>
             </div>
+            {pendingPlan?.conversationId === activeId && (
+              <div className="implementation-plan" role="region" aria-label="Implementation plan">
+                <div className="implementation-plan-header">
+                  <div>
+                    <span className="plan-label">Implementation plan</span>
+                    <h2>Review before building</h2>
+                  </div>
+                  <span className="plan-status"><Check size={12} /> Ready</span>
+                </div>
+                <div className="implementation-plan-content">
+                  {cleanPlanText(pendingPlan.plan).split(/\r?\n/).map((line, index) => {
+                    const text = line.trim();
+                    if (!text) return <div className="plan-spacer" key={`blank-${index}`} />;
+                    const heading = text.match(/^#{1,3}\s+(.+)$/);
+                    if (heading) return <h3 key={`heading-${index}`}>{heading[1]}</h3>;
+                    const numbered = text.match(/^(\d+)\.\s+(.+)$/);
+                    if (numbered) {
+                      return (
+                        <div className="plan-list-item" key={`number-${index}`}>
+                          <span>{numbered[1]}</span>
+                          <p>{numbered[2]}</p>
+                        </div>
+                      );
+                    }
+                    const bullet = text.match(/^[-*]\s+(.+)$/);
+                    if (bullet) {
+                      return (
+                        <div className="plan-list-item plan-bullet" key={`bullet-${index}`}>
+                          <span />
+                          <p>{bullet[1]}</p>
+                        </div>
+                      );
+                    }
+                    return <p className="plan-paragraph" key={`text-${index}`}>{text}</p>;
+                  })}
+                </div>
+                <div className="implementation-plan-actions">
+                  <button
+                    className="plan-revise"
+                    onClick={() => {
+                      setPrompt(`Revise the plan for: ${pendingPlan.request}`);
+                      setPendingPlan(null);
+                      setPlanningMode(true);
+                      window.requestAnimationFrame(() => promptInputRef.current?.focus());
+                    }}
+                  >
+                    Revise plan
+                  </button>
+                  <button
+                    className="plan-approve"
+                    onClick={() => {
+                      const approved = pendingPlan;
+                      setPendingPlan(null);
+                      void sendMessage(
+                        `Implement the approved plan exactly:\n\n${approved.plan}`,
+                        approved.conversationId,
+                        "build"
+                      );
+                    }}
+                    disabled={isSending}
+                  >
+                    {isSending ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
+                    Approve & build
+                  </button>
+                </div>
+              </div>
+            )}
             {messages.length === 0 && (
               <div className="empty-chat">
                 <div className="empty-icon"><WandSparkles size={20} /></div>
                 <h1>Every good thing starts somewhere.</h1>
-                <p>Describe what you’d like to make. Morrow generates a Next.js app with React, TypeScript, Tailwind CSS, SQL, and a live HTML preview.</p>
                 <div className="starter-prompts">
                   {[
                     "A portfolio for a creative studio",
@@ -1194,7 +1342,7 @@ export default function Home() {
                   ) : null}
                   <div className="message-body">
                     <div className="message-meta">
-                      <strong>{message.role === "user" ? "You" : "Morrow"}</strong>
+                      <strong>{message.role === "user" ? "You" : "Hamshake"}</strong>
                       <span>{formatTime(message.time)}</span>
                     </div>
                     <p>{message.content}</p>
@@ -1203,8 +1351,8 @@ export default function Home() {
                         <button onClick={() => setActiveTab("preview")}><Globe2 size={13} /> View preview <ArrowRight size={12} /></button>
                         <button aria-label="Copy response" title="Copy response" onClick={() => void navigator.clipboard.writeText(message.content)}><Files size={13} /></button>
                         <button
-                          aria-label="Ask Morrow to refine this build"
-                          title="Ask Morrow to refine this build"
+                          aria-label="Ask Hamshake to refine this build"
+                          title="Ask Hamshake to refine this build"
                           onClick={() => void sendMessage("Refine the current build while keeping its existing direction.")}
                         >
                           <RefreshCw size={13} />
@@ -1238,12 +1386,16 @@ export default function Home() {
               />
               <div className="composer-footer">
                 <div className="composer-tools">
-                  <span className="model-badge"><Sparkles size={13} /> Morrow AI</span>
+                  <span className="model-badge"><Sparkles size={13} /> Hamshake AI</span>
                 </div>
                 <div className="send-controls"><span className="enter-hint">Enter to send · Shift+Enter for a new line</span>
                   <button
                     className={`send-button ${prompt.trim() ? "ready" : ""}`}
-                    onClick={() => void sendMessage()}
+                    onClick={() => {
+                      const mode = planningMode ? "plan" : "build";
+                      setPlanningMode(false);
+                      void sendMessage(undefined, undefined, mode);
+                    }}
                     disabled={!prompt.trim() || isSending}
                     aria-label="Send message"
                   >
@@ -1310,13 +1462,17 @@ export default function Home() {
                       <span>{isSending ? "Creating your first build…" : "Your preview will appear here."}</span>
                     </div>
                   ) : (
-                    <iframe
-                      key={previewVersion}
-                      title="Live site preview"
-                      srcDoc={previewCode}
-                      sandbox="allow-scripts"
-                      className="preview-frame"
-                    />
+                    <div className="static-preview-shell" key={previewVersion}>
+                      <div className="static-preview-notice" role="status">
+                        HTML snapshot preview <span>Next.js server routes, actions, and backend integrations aren’t running here.</span>
+                      </div>
+                      <iframe
+                        title="HTML snapshot preview"
+                        srcDoc={keepPreviewNavigationLocal(previewCode)}
+                        sandbox="allow-scripts allow-forms"
+                        className="preview-frame"
+                      />
+                    </div>
                   )}
                 </div>
               </div>
@@ -1350,7 +1506,7 @@ export default function Home() {
           <div className="workbench-footer">
             <span>
               <span className="live-dot" />
-              {activeConversation?.html ? "Preview is ready" : isSending ? "Building preview…" : "Waiting for your first build"}
+              {activeConversation?.html ? "HTML snapshot ready" : isSending ? "Preparing preview…" : "Waiting for your first build"}
             </span>
             <span><Clock3 size={12} />{activeConversation?.updatedAt ? `Updated ${formatTime(activeConversation.updatedAt)}` : "No build yet"}</span>
             <span className="footer-spacer" />
