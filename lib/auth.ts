@@ -11,7 +11,7 @@ type StoredSession = AccountUser & {
 
 const SESSION_COOKIE = "hamshake_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
-const PASSWORD_ITERATIONS = 310_000;
+const PASSWORD_ITERATIONS = 100_000; // Cloudflare Workers WebCrypto maximum.
 const DUMMY_SALT = "7f80d0b302660f1aa8131fc4cdd31ac2";
 const encoder = new TextEncoder();
 
@@ -165,7 +165,7 @@ export async function verifyPassword(
   account: { password_salt: string; password_hash: string; password_iterations: number } | null
 ): Promise<boolean> {
   const iterations = account?.password_iterations ?? PASSWORD_ITERATIONS;
-  const validIterations = Number.isInteger(iterations) && iterations >= 100_000 && iterations <= 1_000_000;
+  const validIterations = Number.isInteger(iterations) && iterations === PASSWORD_ITERATIONS;
   const salt = account && validIterations ? account.password_salt : DUMMY_SALT;
   const hash = await hashPassword(password, salt, validIterations ? iterations : PASSWORD_ITERATIONS);
   return Boolean(account && validIterations) &&
