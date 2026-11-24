@@ -19,5 +19,13 @@
   ],
   "images": {
     "binding": "IMAGES"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "PROJECTS_DB",
+      "database_name": "app_builder",
+      "database_id": "5dcd66c2-526b-4a54-886e-56108fbc9b39",
+      "migrations_dir": "migrations"
+    }
+  ]
 }

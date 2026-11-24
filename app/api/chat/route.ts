@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { getAuthenticatedUser, isSameOrigin, type AccountUser } from "@/lib/auth";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -18,26 +18,18 @@ type ChatRequest = {
 };
 
 export async function POST(request: Request) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const accessToken = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!accessToken) {
-    return NextResponse.json({ error: "Sign in is required to build an app." }, { status: 401 });
+  if (!isSameOrigin(request)) {
+    return NextResponse.json({ error: "This request must come from Hamshake." }, { status: 403 });
   }
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return NextResponse.json({ error: "Supabase authentication is not configured." }, { status: 503 });
-  }
+  let user: AccountUser | null = null;
   try {
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
-    });
-    const { data, error } = await supabase.auth.getUser(accessToken);
-    if (error || !data.user) {
-      return NextResponse.json({ error: "Your session is invalid or expired. Please sign in again." }, { status: 401 });
-    }
+    user = await getAuthenticatedUser(request);
   } catch (error) {
-    console.error("Could not verify the Supabase session:", error);
-    return NextResponse.json({ error: "Could not verify your session. Please try again." }, { status: 503 });
+    console.error("Could not verify the D1 account session:", error);
+    return NextResponse.json({ error: "Could not verify your sign-in session." }, { status: 503 });
+  }
+  if (!user) {
+    return NextResponse.json({ error: "Sign in is required to build an app." }, { status: 401 });
   }
 
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -154,7 +146,7 @@ Do not use Markdown fences around the JSON. Current project files:\n${JSON.strin
 - For subsequent requests on an existing project, preserve its established sitemap unless the user asks to change it; when adding a multi-page experience, plan the routes before coding and implement each as a real Next.js App Router route with complete, distinct content.
 - In the standalone HTML preview, represent the principal requested routes and make navigation usable without a server: use hash-based routes, render the correct page for the current hash, and support browser back/forward. Internal preview links must stay inside the preview (use routes such as "#/" or "#/chat", never root-relative hrefs like "/"). Keep the preview's information architecture and visual direction aligned with the generated Next.js routes.
 - Make controls functional, with coherent loading, success, empty, and error states where relevant. No decorative buttons, dead links, href="#", or controls with no behavior.
-- Build for production use, not just a convincing screenshot: implement the requested workflows end to end, validate user input, provide actionable error feedback, and handle loading, empty, success, and failure states. Use secure, appropriately scoped data access and row-level security for Supabase persistence. Do not present mocked or incomplete integrations as working functionality.
+- Build for production use, not just a convincing screenshot: implement the requested workflows end to end, validate user input, provide actionable error feedback, and handle loading, empty, success, and failure states. Use Cloudflare D1 for persistence, access it only from server routes/actions through the Cloudflare binding, use parameterized SQL, and enforce user authorization in every server request because D1 has no row-level security. Use only configured Cloudflare services; never add external auth, storage, realtime, or database providers, and never expose database bindings to browser code. Do not present mocked or incomplete integrations as working functionality.
 - Prefer shadcn/ui components and conventions for common interface patterns when they fit the product. Since generated projects may not have shadcn/ui configured, include the component source and any required dependencies in the returned project, or implement an accessible equivalent; never import unavailable components or assume a CLI setup.
 - Use lucide-react for interface icons where appropriate. Keep icons consistent in size and stroke, provide accessible labels for icon-only controls, and do not substitute emoji or arbitrary Unicode characters for icons.
 - Build desktop and mobile layouts deliberately, with keyboard access, semantic landmarks, clear focus states, and no clipped content or horizontal overflow.
@@ -162,8 +154,8 @@ Do not use Markdown fences around the JSON. Current project files:\n${JSON.strin
 - After implementation, review the complete user journey and all routes at desktop and mobile sizes; check responsive layouts, visual hierarchy, spacing, typography, asset loading, keyboard/focus behavior, functionality, and consistency between the preview and source. If browser rendering is available, inspect the rendered app and correct visible issues before finishing. Otherwise, perform a careful code-level review and do not claim browser validation. Confirm the app's purpose is immediately clear, the next action is obvious, and nothing is generic, ornamental, or nonfunctional. In "reply", briefly explain the product-specific idea and key UX choices.
 - Preserve existing behavior and design unless the user asks to change them. For edits, inspect and update existing files rather than replacing working features with a fresh mock.
 - Keep code runnable: check imports, TypeScript/JSX syntax, Next.js route conventions, Tailwind utilities, file paths, and accessibility. Avoid adding dependencies unless needed.
-- Always include package.json, tsconfig.json, next.config.ts, app/layout.tsx, app/page.tsx, app/globals.css, postcss.config.mjs, and supabase/schema.sql, plus only the routes/components needed for the requested workflow. Keep the implementation focused: avoid filler pages, placeholder sections, decorative controls, and unnecessary dependencies. Respect the response limits: 24 files, 16,000 characters per file, 50,000 total file characters, and 16,000 characters for the standalone HTML preview.
-- The SQL file must contain Supabase/PostgreSQL DDL and RLS policies when persistence is needed; otherwise leave a short SQL comment.
+- Always include package.json, tsconfig.json, next.config.ts, app/layout.tsx, app/page.tsx, app/globals.css, postcss.config.mjs, wrangler.jsonc, and migrations/0001_initial.sql, plus only the routes/components needed for the requested workflow. Include @opennextjs/cloudflare and wrangler when the app needs D1. Keep the implementation focused: avoid filler pages, placeholder sections, decorative controls, and unnecessary dependencies. Respect the response limits: 24 files, 16,000 characters per file, 50,000 total file characters, and 16,000 characters for the standalone HTML preview.
+- The migration file must contain Cloudflare D1/SQLite DDL when persistence is needed; otherwise leave a short SQL comment. D1 has no built-in authentication or row-level security: for private team apps use Cloudflare Access; for public accounts implement secure server-side sessions and enforce ownership in every route. Do not use external backend providers.
 Before returning, self-review the user journey across every route, responsive behavior, visual consistency, syntax, accessibility, and whether the preview matches the actual app.
 Return a JSON object with exactly three properties:
 "reply": a concise summary of what changed,
@@ -245,7 +237,7 @@ Do not use Markdown fences or comments about unavailable features. Current proje
       !validGeneratedFiles ||
       new Set(generatedFiles.map((file) => file.path)).size !== generatedFiles.length ||
       generatedFiles.reduce((total, file) => total + file.content.length, 0) > 50000 ||
-      !["package.json", "tsconfig.json", "next.config.ts", "app/layout.tsx", "app/page.tsx", "app/globals.css", "postcss.config.mjs", "supabase/schema.sql"].every(
+      !["package.json", "tsconfig.json", "next.config.ts", "app/layout.tsx", "app/page.tsx", "app/globals.css", "postcss.config.mjs", "wrangler.jsonc", "migrations/0001_initial.sql"].every(
         (path) => generatedFiles.some((file) => file.path === path)
       )
     ) {

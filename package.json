@@ -7,10 +7,14 @@
     "build": "next build",
     "build:cloudflare": "opennextjs-cloudflare build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "db:migrate:local": "node scripts/wrangler-d1.mjs d1 migrations apply app_builder --local",
+    "db:migrate:remote": "node scripts/wrangler-d1.mjs d1 migrations apply app_builder --remote"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.57.0",
     "lucide-react": "^0.468.0",
     "next": "^15.5.0",
     "react": "^19.1.0",

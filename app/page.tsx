@@ -2,6 +2,7 @@
 
 import {
   ArrowRight,
+  ArrowDown,
   ArrowUp,
   Check,
   ChevronRight,
@@ -25,6 +26,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  CSSProperties,
   FormEvent,
   KeyboardEvent,
   useCallback,
@@ -32,8 +34,11 @@ import {
   useRef,
   useState
 } from "react";
-import { getSupabaseClient } from "@/lib/supabase";
-import type { User } from "@supabase/supabase-js";
+
+type AccountUser = {
+  id: string;
+  email: string;
+};
 
 type Message = {
   id: string;
@@ -137,7 +142,9 @@ const starterProjectFiles: ProjectFile[] = [
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "build:cloudflare": "opennextjs-cloudflare build",
+    "preview": "opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare deploy"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.1.11",
@@ -148,18 +155,23 @@ const starterProjectFiles: ProjectFile[] = [
     "tailwindcss": "^4.1.11"
   },
   "devDependencies": {
+    "@opennextjs/cloudflare": "^1.20.18",
     "@types/node": "^22.15.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "wrangler": "^4.166.0"
   }
 }`
   },
   {
     path: "next.config.ts",
     content: `import type { NextConfig } from "next";
+import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 
 const nextConfig: NextConfig = {};
+
+initOpenNextCloudflareForDev();
 
 export default nextConfig;`
   },
@@ -283,9 +295,30 @@ a:focus-visible {
 };`
   },
   {
-    path: "supabase/schema.sql",
-    content: `-- Add Supabase/PostgreSQL tables here when this project needs persistent data.
--- Enable row-level security and scope policies to auth.uid() for user-owned records.`
+    path: "wrangler.jsonc",
+    content: `{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "generated-app",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2025-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "generated-app-db",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+}`
+  },
+  {
+    path: "migrations/0001_initial.sql",
+    content: `-- Add Cloudflare D1 SQLite tables here when this project needs persistent data.`
   }
 ];
 
@@ -415,9 +448,11 @@ export default function Home() {
   const [landingPrompt, setLandingPrompt] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
-  const [user, setUser] = useState<User | null>(null);
-  const [authConfigured, setAuthConfigured] = useState(false);
+  const [user, setUser] = useState<AccountUser | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [chatPaneWidth, setChatPaneWidth] = useState<number | null>(null);
+  const [isResizingPanes, setIsResizingPanes] = useState(false);
+  const [isChatAtLatest, setIsChatAtLatest] = useState(true);
   const [landingSidebarOpen, setLandingSidebarOpen] = useState(false);
   const [isCompactLayout, setIsCompactLayout] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
@@ -436,66 +471,89 @@ export default function Home() {
   const [pendingPlan, setPendingPlan] = useState<{ conversationId: string; request: string; plan: string } | null>(null);
   const [planningMode, setPlanningMode] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isChatAtLatestRef = useRef(true);
+  const chatContentRef = useRef<HTMLDivElement>(null);
+  const studioLayoutRef = useRef<HTMLDivElement>(null);
+  const chatPaneRef = useRef<HTMLElement>(null);
   const landingPromptRef = useRef<HTMLTextAreaElement>(null);
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
   const historySearchInputRef = useRef<HTMLInputElement>(null);
   const projectSaveQueueRef = useRef(Promise.resolve());
   const savedProjectVersionsRef = useRef(new Map<string, number>());
   const currentUserIdRef = useRef<string | null>(null);
-  currentUserIdRef.current = user?.id ?? null;
+  const applyAuthUser = useCallback((nextUser: AccountUser | null) => {
+    const nextUserId = nextUser?.id ?? null;
+    if (currentUserIdRef.current !== nextUserId) {
+      setConversations([]);
+      setActiveId("");
+      setHistoryOwnerId(null);
+      setProjectsLoadedForUser(null);
+      savedProjectVersionsRef.current.clear();
+      if (!nextUser) {
+        setView("landing");
+        setPrompt("");
+      }
+    }
+    currentUserIdRef.current = nextUserId;
+    setUser(nextUser);
+  }, []);
 
   const activeConversation = conversations.find((item) => item.id === activeId);
   const messages = activeConversation?.messages ?? [];
   const projectFiles = activeConversation?.files ?? [];
   const selectedFile = projectFiles.find((file) => file.path === selectedFilePath) ?? projectFiles[0];
+  const getChatPaneWidthBounds = () => {
+    const layout = studioLayoutRef.current?.getBoundingClientRect();
+    const chatPane = chatPaneRef.current?.getBoundingClientRect();
+    if (!layout || !chatPane) return null;
+    const narrow = window.innerWidth <= 1120;
+    const wide = window.innerWidth >= 1500;
+    const minimumChatWidth = narrow ? 320 : wide ? 390 : 345;
+    const minimumWorkbenchWidth = narrow ? 390 : wide ? 590 : 480;
+    const maximumChatWidth = layout.right - chatPane.left - minimumWorkbenchWidth - 8;
+    return { minimumChatWidth, maximumChatWidth };
+  };
+  const resizeChatPane = (clientX: number) => {
+    const chatPane = chatPaneRef.current?.getBoundingClientRect();
+    const bounds = getChatPaneWidthBounds();
+    if (!chatPane || !bounds || bounds.maximumChatWidth < bounds.minimumChatWidth) return;
+    setChatPaneWidth(
+      Math.max(bounds.minimumChatWidth, Math.min(clientX - chatPane.left, bounds.maximumChatWidth))
+    );
+  };
+  const currentChatPaneWidth =
+    chatPaneWidth ?? chatPaneRef.current?.getBoundingClientRect().width ?? 345;
+  const chatPaneWidthBounds = getChatPaneWidthBounds();
 
   useEffect(() => {
-    const supabase = getSupabaseClient();
-    setAuthConfigured(Boolean(supabase));
-    if (!supabase) {
-      setAuthLoaded(true);
-      return;
-    }
-
-    const applyAuthUser = (nextUser: User | null) => {
-      const nextUserId = nextUser?.id ?? null;
-      if (currentUserIdRef.current !== nextUserId) {
-        setConversations([]);
-        setActiveId("");
-        setHistoryOwnerId(null);
-        setProjectsLoadedForUser(null);
-        savedProjectVersionsRef.current.clear();
-        if (!nextUser) {
-          setView("landing");
-          setPrompt("");
-        }
+    let cancelled = false;
+    const loadAuthSession = async () => {
+      try {
+        const response = await fetch("/api/auth", { cache: "no-store" });
+        const result = (await response.json()) as { user?: AccountUser | null; error?: string };
+        if (!response.ok) throw new Error(result.error ?? "Could not check your sign-in session.");
+        if (!cancelled) applyAuthUser(result.user ?? null);
+      } catch (error) {
+        console.error("Could not read the D1 account session:", error);
+        if (!cancelled) applyAuthUser(null);
+      } finally {
+        if (!cancelled) setAuthLoaded(true);
       }
-      currentUserIdRef.current = nextUserId;
-      setUser(nextUser);
-      setAuthLoaded(true);
     };
-
-    let authEventReceived = false;
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      authEventReceived = true;
-      applyAuthUser(session?.user ?? null);
-    });
-
-    supabase.auth.getUser().then(({ data, error }) => {
-      if (error && error.name !== "AuthSessionMissingError") {
-        console.error("Could not read the current Supabase session:", error.message);
-      }
-      if (!authEventReceived) applyAuthUser(data.user);
-      else setAuthLoaded(true);
-    });
-    return () => data.subscription.unsubscribe();
-  }, []);
+    void loadAuthSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyAuthUser]);
 
   useEffect(() => {
     try {
       window.localStorage.removeItem("hamshake-conversations");
+      for (const key of Object.keys(window.localStorage)) {
+        if (key.startsWith("sb-")) window.localStorage.removeItem(key);
+      }
     } catch (error) {
-      console.error("Could not remove locally cached projects:", error);
+      console.error("Could not remove legacy project and auth data from local storage:", error);
     }
   }, []);
 
@@ -511,21 +569,19 @@ export default function Home() {
     }
 
     let cancelled = false;
-    let realtimeChannel: ReturnType<NonNullable<typeof supabase>["channel"]> | null = null;
-    const supabase = getSupabaseClient();
-    if (!supabase) return;
     const loadProjects = async () => {
       setProjectSyncStatus("loading");
       setProjectSyncError("");
       try {
-        const { data, error } = await supabase
-          .from("projects")
-          .select("id, title, updated_at, messages, html, files, is_new_project")
-          .eq("user_id", user.id)
-          .order("updated_at", { ascending: false });
-        if (error) throw error;
+        const response = await fetch("/api/projects", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+        const result = (await response.json()) as { projects?: ProjectRow[]; error?: string };
+        if (!response.ok) throw new Error(result.error ?? "Could not load projects.");
+        if (!Array.isArray(result.projects)) throw new Error("The project service returned invalid data.");
 
-        const cloudRows = (data ?? []) as ProjectRow[];
+        const cloudRows = result.projects;
         if (cancelled) return;
         savedProjectVersionsRef.current = new Map(
           cloudRows.map((project) => [project.id, Date.parse(project.updated_at)])
@@ -544,51 +600,10 @@ export default function Home() {
         setHistoryOwnerId(user.id);
         setProjectsLoadedForUser(user.id);
         setProjectSyncStatus("saved");
-
-        realtimeChannel = supabase
-          .channel(`projects:${user.id}`)
-          .on(
-            "postgres_changes",
-            { event: "*", schema: "public", table: "projects", filter: `user_id=eq.${user.id}` },
-            (payload) => {
-              if (payload.eventType === "DELETE") {
-                const deleted = payload.old as { id?: string };
-                if (!deleted.id) return;
-                savedProjectVersionsRef.current.delete(deleted.id);
-                setConversations((existing) => existing.filter((project) => project.id !== deleted.id));
-                return;
-              }
-
-              const row = payload.new as ProjectRow;
-              if (!row.id || !row.updated_at) return;
-              const version = Date.parse(row.updated_at);
-              setConversations((existing) => {
-                const current = existing.find((project) => project.id === row.id);
-                if (current && Date.parse(current.updatedAt) >= version) return existing;
-                savedProjectVersionsRef.current.set(row.id, version);
-                const updated: Conversation = {
-                  id: row.id,
-                  title: row.title,
-                  updatedAt: row.updated_at,
-                  messages: row.messages,
-                  html: row.html ?? undefined,
-                  files: row.files,
-                  isNewProject: row.is_new_project
-                };
-                return [updated, ...existing.filter((project) => project.id !== row.id)]
-                  .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-              });
-            }
-          )
-          .subscribe((status) => {
-            if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-              console.error(`Supabase project realtime subscription failed: ${status}`);
-            }
-          });
       } catch (error) {
         if (cancelled) return;
-        const detail = getErrorMessage(error, "Could not load projects from Supabase.");
-        console.warn("Could not load or import Supabase projects:", error);
+        const detail = getErrorMessage(error, "Could not load projects from Cloudflare D1.");
+        console.warn("Could not load Cloudflare D1 projects:", error);
         setProjectSyncError(detail);
         setProjectSyncStatus("error");
       }
@@ -597,7 +612,6 @@ export default function Home() {
     void loadProjects();
     return () => {
       cancelled = true;
-      if (realtimeChannel) void supabase.removeChannel(realtimeChannel);
     };
   }, [authLoaded, projectLoadAttempt, user]);
 
@@ -608,12 +622,9 @@ export default function Home() {
     );
     if (projects.length === 0) return;
 
-    const supabase = getSupabaseClient();
-    if (!supabase) return;
     const userId = user.id;
     const rows = projects.map((project) => ({
       id: project.id,
-      user_id: userId,
       title: project.title,
       updated_at: project.updatedAt,
       messages: project.messages,
@@ -626,8 +637,16 @@ export default function Home() {
     const timer = window.setTimeout(() => {
       projectSaveQueueRef.current = projectSaveQueueRef.current
         .then(async () => {
-          const { error } = await supabase.from("projects").upsert(rows, { onConflict: "user_id,id" });
-          if (error) throw error;
+          const response = await fetch("/api/projects", {
+            method: "PUT",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ projects: rows })
+          });
+          const result = (await response.json()) as { error?: string };
+          if (!response.ok) throw new Error(result.error ?? "Could not save projects.");
           rows.forEach((row) => savedProjectVersionsRef.current.set(row.id, Date.parse(row.updated_at)));
           if (currentUserIdRef.current === userId) {
             setProjectSyncStatus("saved");
@@ -635,8 +654,8 @@ export default function Home() {
           }
         })
         .catch((error: unknown) => {
-          const detail = getErrorMessage(error, "Could not save projects to Supabase.");
-          console.warn("Could not save Supabase projects:", error);
+          const detail = getErrorMessage(error, "Could not save projects to Cloudflare D1.");
+          console.warn("Could not save Cloudflare D1 projects:", error);
           if (currentUserIdRef.current === userId) {
             setProjectSyncError(detail);
             setProjectSyncStatus("error");
@@ -647,8 +666,29 @@ export default function Home() {
   }, [conversations, historyOwnerId, projectSaveAttempt, projectsLoadedForUser, user]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (isChatAtLatestRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
   }, [messages, isSending]);
+
+  useEffect(() => {
+    isChatAtLatestRef.current = true;
+    setIsChatAtLatest(true);
+    messagesEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [activeId]);
+
+  const handleChatScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    const atLatest = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+    isChatAtLatestRef.current = atLatest;
+    setIsChatAtLatest(atLatest);
+  };
+
+  const scrollChatToLatest = () => {
+    isChatAtLatestRef.current = true;
+    setIsChatAtLatest(true);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  };
 
   useEffect(() => {
     setPreviewCode(activeConversation?.html ?? "");
@@ -689,14 +729,10 @@ export default function Home() {
   const requireSignIn = useCallback(() => {
     if (user) return true;
     setAuthMode("signin");
-    setAuthMessage(
-      authConfigured
-        ? "Sign in to build and save your project. Your idea will stay in the prompt."
-        : "Configure Supabase authentication before starting a project."
-    );
+    setAuthMessage("Sign in to build and save your project. Your idea will stay in the prompt.");
     setIsAuthOpen(true);
     return false;
-  }, [authConfigured, user]);
+  }, [user]);
 
   useEffect(() => {
     const handleNewProjectShortcut = (event: globalThis.KeyboardEvent) => {
@@ -802,16 +838,11 @@ export default function Home() {
     setIsSending(true);
 
     try {
-      const supabase = getSupabaseClient();
-      if (!supabase) throw new Error("Supabase authentication is not configured.");
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError) throw sessionError;
-      if (!session) throw new Error("Sign in is required to build and save projects.");
       const response = await fetch("/api/chat", {
         method: "POST",
+        credentials: "same-origin",
         headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           files: currentFiles,
@@ -915,27 +946,21 @@ export default function Home() {
   const handleAuth = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setAuthMessage("");
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      setAuthMessage("Add your Supabase URL and anon key to .env.local to enable authentication.");
-      return;
-    }
-
     setAuthBusy(true);
     try {
-      const result =
-        authMode === "signin"
-          ? await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword })
-          : await supabase.auth.signUp({ email: authEmail, password: authPassword });
-      if (result.error) {
-        setAuthMessage(result.error.message);
-      } else if (authMode === "signup" && !result.data.session) {
-        setAuthMessage("Check your inbox to confirm your email and finish creating your account.");
-      } else {
-        setIsAuthOpen(false);
-        setAuthPassword("");
-        setAuthMessage("");
-      }
+      const response = await fetch("/api/auth", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: authMode, email: authEmail, password: authPassword })
+      });
+      const result = (await response.json()) as { user?: AccountUser; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Authentication failed. Please try again.");
+      if (!result.user) throw new Error("The authentication service returned no account.");
+      applyAuthUser(result.user);
+      setIsAuthOpen(false);
+      setAuthPassword("");
+      setAuthMessage("");
     } catch (error) {
       setAuthMessage(error instanceof Error ? error.message : "Authentication failed. Please try again.");
     } finally {
@@ -944,10 +969,18 @@ export default function Home() {
   };
 
   const signOut = async () => {
-    const supabase = getSupabaseClient();
-    if (!supabase) return;
-    const { error } = await supabase.auth.signOut();
-    if (error) console.error("Could not sign out:", error.message);
+    try {
+      const response = await fetch("/api/auth", {
+        method: "DELETE",
+        credentials: "same-origin"
+      });
+      const result = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not sign out. Please try again.");
+      applyAuthUser(null);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Could not sign out. Please try again.");
+      setIsAuthOpen(true);
+    }
   };
 
   const filteredConversations = conversations.filter((conversation) =>
@@ -972,7 +1005,9 @@ export default function Home() {
       </div>
 
       <div className="history-heading">
-        <div className="sidebar-section-heading"><span>Recent projects</span></div>
+        <div className="sidebar-section-heading">
+          <span>Recent projects</span>
+        </div>
         <label className="history-search">
           <Search size={14} />
           <input
@@ -1035,7 +1070,7 @@ export default function Home() {
             }}
           >
             <span className="avatar guest-avatar">M</span>
-            <span><strong>Your account</strong><small>{authConfigured ? "Create your free account" : "Sign-in setup available"}</small></span>
+            <span><strong>Your account</strong><small>Create your free account</small></span>
             <ChevronRight size={14} />
           </button>
         )}
@@ -1164,38 +1199,23 @@ export default function Home() {
           </a>
         </div>
         <div className="topbar-right">
-          <span
-            className={`save-status ${projectSyncStatus === "error" ? "sync-error" : ""}`}
-            role="status"
-            title={projectSyncError || undefined}
-          >
-            <span />
-            <span className="save-status-label">
-              {!user
-                ? "Sign in to sync projects"
-                : projectSyncStatus === "loading"
-                  ? "Loading projects…"
-                  : projectSyncStatus === "saving"
-                    ? "Saving to Supabase…"
-                    : projectSyncStatus === "error"
-                      ? `Sync failed: ${projectSyncError}`
-                      : "Saved to Supabase"}
-            </span>
-            {user && projectSyncStatus === "error" && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (historyOwnerId === user.id) {
-                    setProjectSaveAttempt((attempt) => attempt + 1);
-                  } else {
-                    setProjectLoadAttempt((attempt) => attempt + 1);
-                  }
-                }}
-              >
-                Retry
-              </button>
-            )}
-          </span>
+          {user && projectSyncStatus === "error" && (
+            <button
+              className="sync-retry-button"
+              type="button"
+              aria-label={`Sync failed: ${projectSyncError}. Retry synchronization.`}
+              title={projectSyncError}
+              onClick={() => {
+                if (historyOwnerId === user.id) {
+                  setProjectSaveAttempt((attempt) => attempt + 1);
+                } else {
+                  setProjectLoadAttempt((attempt) => attempt + 1);
+                }
+              }}
+            >
+              Sync failed · Retry
+            </button>
+          )}
           <span className="topbar-divider hide-small" />
           {user ? (
             <div className="account-chip">
@@ -1220,7 +1240,11 @@ export default function Home() {
         </div>
       </header>
 
-      <div className={`studio-layout ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
+      <div
+        ref={studioLayoutRef}
+        className={`studio-layout ${sidebarOpen ? "" : "sidebar-collapsed"} ${isResizingPanes ? "panes-resizing" : ""}`}
+        style={{ "--chat-pane-width": chatPaneWidth ? `${chatPaneWidth}px` : undefined } as CSSProperties}
+      >
         {sidebarOpen && renderProjectsNavigation()}
 
         {isCompactLayout && sidebarOpen && (
@@ -1231,7 +1255,7 @@ export default function Home() {
           />
         )}
 
-        <section className="chat-pane">
+        <section className="chat-pane" ref={chatPaneRef}>
           <div className="project-titlebar">
             <div className="project-title">
               <div className="project-icon"><WandSparkles size={15} /></div>
@@ -1239,7 +1263,7 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="chat-content">
+          <div className="chat-content" ref={chatContentRef} onScroll={handleChatScroll}>
             <div className="project-context">
               <span className="context-icon"><Sparkles size={13} /></span>
               <span>Building something thoughtful, together.</span>
@@ -1373,6 +1397,11 @@ export default function Home() {
             </div>
           </div>
 
+          {!isChatAtLatest && messages.length > 0 && (
+            <button className="scroll-to-latest" onClick={scrollChatToLatest}>
+              <ArrowDown size={14} /> Latest message
+            </button>
+          )}
           <div className="composer-wrap">
             <div className="composer">
               <textarea
@@ -1407,6 +1436,58 @@ export default function Home() {
             <div className="composer-note"><LockKeyhole size={10} /> Your ideas are yours. Always.</div>
           </div>
         </section>
+
+        {!isCompactLayout && (
+          <div
+            className="pane-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize chat and preview panels"
+            aria-valuemin={chatPaneWidthBounds?.minimumChatWidth}
+            aria-valuemax={chatPaneWidthBounds?.maximumChatWidth}
+            aria-valuenow={Math.round(currentChatPaneWidth)}
+            tabIndex={0}
+            title="Drag to resize panels; use arrow keys to adjust"
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              setIsResizingPanes(true);
+              resizeChatPane(event.clientX);
+            }}
+            onPointerMove={(event) => {
+              if (isResizingPanes) resizeChatPane(event.clientX);
+            }}
+            onPointerUp={() => setIsResizingPanes(false)}
+            onPointerCancel={() => setIsResizingPanes(false)}
+            onKeyDown={(event) => {
+              const step = event.shiftKey ? 48 : 16;
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                resizeChatPane(
+                  (chatPaneRef.current?.getBoundingClientRect().left ?? 0) +
+                  currentChatPaneWidth -
+                  step
+                );
+              } else if (event.key === "ArrowRight") {
+                event.preventDefault();
+                resizeChatPane(
+                  (chatPaneRef.current?.getBoundingClientRect().left ?? 0) +
+                  currentChatPaneWidth +
+                  step
+                );
+              } else if (event.key === "Home" && chatPaneWidthBounds) {
+                event.preventDefault();
+                setChatPaneWidth(chatPaneWidthBounds.minimumChatWidth);
+              } else if (event.key === "End" && chatPaneWidthBounds) {
+                event.preventDefault();
+                setChatPaneWidth(chatPaneWidthBounds.maximumChatWidth);
+              }
+            }}
+          >
+            <span />
+          </div>
+        )}
 
         <section className="workbench">
           <div className="workbench-top">
@@ -1533,9 +1614,9 @@ export default function Home() {
                   id="auth-password"
                   type={showPassword ? "text" : "password"}
                   autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-                  minLength={6}
+                  minLength={authMode === "signup" ? 12 : undefined}
                   required
-                  placeholder="At least 6 characters"
+                  placeholder={authMode === "signup" ? "At least 12 characters" : "Your password"}
                   value={authPassword}
                   onChange={(event) => setAuthPassword(event.target.value)}
                 />
@@ -1561,7 +1642,7 @@ export default function Home() {
                 {authMode === "signin" ? "Create an account" : "Sign in"}
               </button>
             </div>
-            <div className="auth-footnote"><LockKeyhole size={11} /> Your account is securely powered by Supabase.</div>
+            <div className="auth-footnote"><LockKeyhole size={11} /> Your account is stored securely in Cloudflare. Email verification and password recovery are not available yet.</div>
           </section>
         </div>
       )}
