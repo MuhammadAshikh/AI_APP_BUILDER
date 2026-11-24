@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getAuthenticatedUser, isSameOrigin, type AccountUser } from "@/lib/auth";
 
 type ChatMessage = {
@@ -32,11 +33,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Sign in is required to build an app." }, { status: 401 });
   }
 
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  const { env } = await getCloudflareContext({ async: true });
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID;
+  const apiToken = env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN;
   if (!accountId || !apiToken) {
     return NextResponse.json(
-      { error: "Cloudflare Workers AI is not configured. Add CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN to .env.local." },
+      { error: "Cloudflare Workers AI is not configured. Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in the Worker environment or .env.local for local development." },
       { status: 503 }
     );
   }
@@ -104,7 +106,7 @@ export async function POST(request: Request) {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: process.env.CLOUDFLARE_AI_MODEL || "@cf/openai/gpt-oss-120b",
+          model: env.CLOUDFLARE_AI_MODEL || process.env.CLOUDFLARE_AI_MODEL || "@cf/openai/gpt-oss-120b",
           messages: [
             {
               role: "system",

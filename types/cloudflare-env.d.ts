@@ -11,4 +11,7 @@ interface HamshakeD1Database {
 
 interface CloudflareEnv {
   PROJECTS_DB?: HamshakeD1Database;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_AI_MODEL?: string;
 }

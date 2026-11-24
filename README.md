@@ -6,7 +6,7 @@ A chat-first creative coding workspace built with Next.js, React, TypeScript, Cl
 
 1. Use Node.js 22.12 or newer and install dependencies with `npm install`.
 2. Copy `.env.example` to the project-root `.env.local`.
-3. Add your Cloudflare account ID and Workers AI API token to enable generation. The AI token stays on the server and needs Workers AI Read and Edit permissions. The default model is `@cf/openai/gpt-oss-120b`; set `CLOUDFLARE_AI_MODEL` to use another supported model.
+3. Add your Cloudflare account ID and Workers AI API token to enable generation. For local development, put them in `.env.local`; for deployment, configure `CLOUDFLARE_ACCOUNT_ID` and the `CLOUDFLARE_API_TOKEN` secret in the Worker environment. The AI token stays on the server and needs Workers AI Read and Edit permissions. The default model is `@cf/openai/gpt-oss-120b`; set `CLOUDFLARE_AI_MODEL` to use another supported model.
 4. The Worker uses the D1 database `app_builder`, configured in `wrangler.jsonc`. Apply the local schema with `npm run db:migrate:local` and the remote schema with `npm run db:migrate:remote`. The migration script reads `CLOUDFLARE_D1_API_TOKEN` from `.env.local` or the environment. The token needs Account D1 Write and Account Settings Read.
 5. Run `npm run dev` and open `http://localhost:3000`.
 
@@ -20,6 +20,6 @@ The preview displays the generated standalone HTML snapshot in a sandboxed ifram
 
 ## Deploy to Cloudflare Workers
 
-The Cloudflare Worker is named `ai-app-builder`. In the Cloudflare Git deployment settings, use `/` as the root directory, `npm run build:cloudflare` as the build command, and `npx wrangler deploy` as the deploy command. The OpenNext build command creates the Worker output that Wrangler deploys; `npm run build` alone only builds the standard Next.js app.
+The Cloudflare Worker is named `app-builder`. In the Cloudflare Git deployment settings, use `/` as the root directory, `npm run build:cloudflare` as the build command, and `npx wrangler deploy` as the deploy command. The OpenNext build command creates the Worker output that Wrangler deploys; `npm run build` alone only builds the standard Next.js app.
 
 The self-reference service binding in `wrangler.jsonc` must target the same Worker name. Keep `name` and `services[0].service` in sync if you rename the Worker. Apply D1 migrations before deploying schema changes.
