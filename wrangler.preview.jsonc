@@ -15,7 +15,7 @@
   },
   "containers": [
     {
-      "class_name": "PreviewContainer",
+      "name": "previewcontainer",
       "scheduling_policy": "durable_object",
       "images": {
         "base": {
@@ -35,7 +35,8 @@
   "exports": {
     "PreviewContainer": {
       "type": "durable-object",
-      "storage": "sqlite"
+      "storage": "sqlite",
+      "container": "previewcontainer"
     }
   },
   "d1_databases": [

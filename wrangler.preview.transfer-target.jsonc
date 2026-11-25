@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "app-builder-preview",
+  "main": "preview-worker/index.ts",
+  "compatibility_date": "2025-11-17",
+  "workers_dev": false,
+  "observability": {
+    "enabled": true
+  },
+  "containers": [
+    {
+      "name": "previewcontainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./preview-worker/Dockerfile"
+        }
+      }
+    }
+  ],
+  "exports": {
+    "PreviewContainer": {
+      "type": "durable-object",
+      "state": "expecting-transfer",
+      "storage": "sqlite",
+      "transfer_from": "app-builder",
+      "container": "previewcontainer"
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "PROJECTS_DB",
+      "database_name": "app_builder",
+      "database_id": "5dcd66c2-526b-4a54-886e-56108fbc9b39"
+    }
+  ]
+}

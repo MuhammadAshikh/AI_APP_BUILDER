@@ -27,7 +27,15 @@ The Cloudflare Workers are named `app-builder` and `app-builder-preview`. Config
 
 Workers Builds deploys to the Worker connected to that build, overriding the Wrangler `name` when they differ. Do not deploy both configs from one build command: that would target both deployments at the connected Worker's name. Use a Workers Paid plan. A first Container deployment may take several minutes.
 
-The original combined deploy command can leave `PreviewContainer` on `app-builder` if run from the `app-builder` Workers Builds project. If that has happened, transfer the Durable Object class to `app-builder-preview` before deploying the main Worker; do not delete it unless its stored state can be discarded. Follow Cloudflare's [Durable Object class transfer procedure](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/#transfer-a-durable-object-class-between-workers), deploying the target's `expecting-transfer` state before the source's `transferred` state. After the transfer commits, deploy the target with its normal binding/configuration, then deploy the main Worker.
+The original combined deploy command can leave `PreviewContainer` on `app-builder` if run from the `app-builder` Workers Builds project. The deployment log confirms this happened. Transfer that Durable Object to `app-builder-preview` before deploying the main Worker; do not delete it unless its stored state can be discarded. To avoid a normal preview deploy creating a second namespace, pause automatic production deployments for both Workers, then run these one-time steps in order from their respective Workers Builds projects:
+
+1. Set the `app-builder-preview` deploy command to `npm run deploy:preview:prepare-transfer` and run a production build. This deploys the target's `expecting-transfer` state without a binding or route.
+2. Set the `app-builder` deploy command to `npm run deploy:legacy-preview:transfer` and run a production build. This commits the `transferred` state and removes the old preview route.
+3. Restore `app-builder-preview`'s deploy command to `npm run deploy:preview` and run a production build to attach the binding and route to the transferred namespace.
+4. Restore `app-builder`'s deploy command to `npm run deploy:cloudflare` and run a production build to deploy the OpenNext app.
+5. Re-enable automatic production deployments.
+
+These are the four stages in Cloudflare's [Durable Object class transfer procedure](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/#transfer-a-durable-object-class-between-workers). Keep the Workers Builds project names matched to their Wrangler config names throughout.
 
 Before deploying:
 

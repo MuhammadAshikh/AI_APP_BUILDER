@@ -8,6 +8,8 @@
     "build:cloudflare": "opennextjs-cloudflare build",
     "deploy:cloudflare": "npx wrangler deploy",
     "deploy:preview": "npx wrangler deploy --config wrangler.preview.jsonc",
+    "deploy:preview:prepare-transfer": "npx wrangler deploy --config wrangler.preview.transfer-target.jsonc",
+    "deploy:legacy-preview:transfer": "npx wrangler deploy --config wrangler.preview.transfer-source.jsonc",
     "start": "next start",
     "lint": "next lint",
     "db:migrate:local": "node scripts/wrangler-d1.mjs d1 migrations apply app_builder --local",
