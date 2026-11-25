@@ -20,12 +20,19 @@ The full-stack preview runs each saved project in its own Cloudflare Container a
 
 ## Deploy to Cloudflare Workers
 
-The Cloudflare Workers are named `app-builder` and `app-builder-preview`. In Cloudflare Workers Builds, use `/` as the root directory, `npm run build:cloudflare` as the build command, and `npm run deploy:cloudflare` as the deploy command. The deploy script publishes the Container preview Worker first, then the OpenNext app Worker. Use a Workers Paid plan and enable Docker-compatible image builds in Workers Builds. A first Container deployment may take several minutes.
+The Cloudflare Workers are named `app-builder` and `app-builder-preview`. Configure a separate Workers Builds project for each Worker, connected to this repository and using `/` as its root directory:
+
+- For `app-builder`, use `npm run build:cloudflare` as the build command and `npm run deploy:cloudflare` as the deploy command.
+- For `app-builder-preview`, leave the build command empty and use `npm run deploy:preview` as the deploy command. Workers Builds supports building and publishing the configured Dockerfile during a production `wrangler deploy`; no separate Docker-compatible-build setting is needed. See Cloudflare's [Container deployment guide](https://developers.cloudflare.com/containers/guides/deploy/).
+
+Workers Builds deploys to the Worker connected to that build, overriding the Wrangler `name` when they differ. Do not deploy both configs from one build command: that would target both deployments at the connected Worker's name. Use a Workers Paid plan. A first Container deployment may take several minutes.
+
+The original combined deploy command can leave `PreviewContainer` on `app-builder` if run from the `app-builder` Workers Builds project. If that has happened, transfer the Durable Object class to `app-builder-preview` before deploying the main Worker; do not delete it unless its stored state can be discarded. Follow Cloudflare's [Durable Object class transfer procedure](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/#transfer-a-durable-object-class-between-workers), deploying the target's `expecting-transfer` state before the source's `transferred` state. After the transfer commits, deploy the target with its normal binding/configuration, then deploy the main Worker.
 
 Before deploying:
 
 1. In the Cloudflare DNS zone for `hamshake.com`, ensure a proxied wildcard DNS record exists for `*.hamshake.com` (a proxied placeholder A record such as `192.0.2.1` is sufficient for a Worker route). Existing explicit DNS records take precedence. The route in `wrangler.preview.jsonc` is `*.hamshake.com/*`; the Worker only serves project hosts in the form `p-<project-uuid>.hamshake.com`. Exact routes such as `www.hamshake.com` are more specific and continue to use their existing Worker. Check for any existing wildcard Worker route first, because it may conflict with the preview route.
 2. Apply the new D1 token-table migration with `npm run db:migrate:remote` before deploying. It creates short-lived, project-scoped preview tokens; only a hash is stored in D1.
-3. Configure the `app-builder-preview` Worker route and verify that the zone has an active certificate covering `*.hamshake.com`. Wrangler deploy needs permission to publish both Workers, manage Containers, configure the route, and access the D1 database.
+3. Configure the `app-builder-preview` Worker route and verify that the zone has an active certificate covering `*.hamshake.com`. Its Workers Builds project needs permission to publish that Worker, manage Containers, configure the route, and access the D1 database.
 
 The self-reference service binding in `wrangler.jsonc` must target the same Worker name. Keep `name` and `services[0].service` in sync if you rename the main Worker. Run `npm run dev` for local development; it continues to show the HTML snapshot because the Cloudflare Container preview runs in the deployed Worker environment.
