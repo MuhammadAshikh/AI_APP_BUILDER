@@ -89,6 +89,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .sidebar { min-width: 0; display: flex; flex-direction: column; padding: 19px 12px 12px; border-right: 1px solid var(--line); background: #fdfdfc; overflow: hidden; }
 .landing-sidebar { position: fixed; z-index: 5; top: 76px; bottom: 0; left: 0; width: min(270px, 86vw); box-shadow: 12px 0 35px #20282024; animation: rise-in .18s ease both; }
 .publish-button:hover { background: #3b5240; }
+.new-project-button { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 36px; margin: 3px 0 9px; border: 1px solid #dfe5dc; border-radius: 6px; background: #fff; color: #4c6852; font-size: 12px; font-weight: 600; cursor: pointer; transition: background .15s, border-color .15s; }
+.new-project-button:hover { border-color: #cbd8ca; background: #f3f6f1; }
+.new-project-button:focus-visible { outline: 2px solid #16864c; outline-offset: 2px; }
 .sidebar-section-heading { display: flex; justify-content: space-between; align-items: center; color: #777e73; text-transform: uppercase; font-size: 10px; letter-spacing: .7px; font-weight: 650; padding: 0 8px; }
 .sidebar-section-heading > svg { color: #a8aaa4; }
 .sidebar > .sidebar-section-heading { margin: 7px 0 9px; }

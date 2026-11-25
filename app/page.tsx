@@ -18,6 +18,7 @@ import {
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   RefreshCw,
   Search,
   Smartphone,
@@ -73,6 +74,7 @@ type ProjectRow = {
 };
 
 type WorkspaceTab = "preview" | "code";
+type PreviewStatus = "idle" | "loading" | "ready" | "error";
 
 const now = () => new Date().toISOString();
 const formatTime = (date: string) =>
@@ -467,6 +469,9 @@ export default function Home() {
   const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
   const [projectSaveAttempt, setProjectSaveAttempt] = useState(0);
   const [previewCode, setPreviewCode] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [previewStatus, setPreviewStatus] = useState<PreviewStatus>("idle");
+  const [previewError, setPreviewError] = useState("");
   const [selectedFilePath, setSelectedFilePath] = useState("app/page.tsx");
   const [pendingPlan, setPendingPlan] = useState<{ conversationId: string; request: string; plan: string } | null>(null);
   const [planningMode, setPlanningMode] = useState(false);
@@ -694,6 +699,79 @@ export default function Home() {
     setPreviewCode(activeConversation?.html ?? "");
     setSelectedFilePath(activeConversation?.files?.[0]?.path ?? "app/page.tsx");
   }, [activeId, activeConversation?.html, activeConversation?.files, activeConversation?.isNewProject]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const project = activeConversation;
+    setPreviewUrl("");
+    setPreviewError("");
+
+    if (
+      !user ||
+      projectsLoadedForUser !== user.id ||
+      !project?.html ||
+      !project.files?.some((file) => file.path === "package.json")
+    ) {
+      setPreviewStatus("idle");
+      return;
+    }
+
+    if (projectSyncStatus === "error") {
+      setPreviewError(projectSyncError || "Save the project before opening its full-stack preview.");
+      setPreviewStatus("error");
+      return;
+    }
+    if (projectSyncStatus !== "saved") {
+      setPreviewStatus("loading");
+      return;
+    }
+
+    setPreviewStatus("loading");
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}/preview`, {
+            method: "POST",
+            credentials: "same-origin"
+          });
+          const result = (await response.json()) as { error?: string; previewUrl?: string };
+          if (!response.ok) throw new Error(result.error ?? "Could not open the full-stack preview.");
+          if (typeof result.previewUrl !== "string") {
+            throw new Error("The preview service returned an invalid URL.");
+          }
+
+          const url = new URL(result.previewUrl);
+          if (url.protocol !== "https:" || url.hostname !== `p-${project.id}.hamshake.com`) {
+            throw new Error("The preview service returned an unexpected host.");
+          }
+          if (!cancelled) {
+            setPreviewUrl(url.toString());
+            setPreviewStatus("ready");
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setPreviewError(getErrorMessage(error, "Could not start the full-stack preview."));
+            setPreviewStatus("error");
+          }
+        }
+      })();
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    activeId,
+    activeConversation?.html,
+    activeConversation?.files,
+    activeConversation?.updatedAt,
+    previewVersion,
+    projectSyncError,
+    projectSyncStatus,
+    projectsLoadedForUser,
+    user?.id
+  ]);
 
   useEffect(() => {
     if (projectFiles.length === 0 && activeTab === "code") {
@@ -1000,9 +1078,16 @@ export default function Home() {
       id={landing ? "landing-projects-navigation" : "projects-navigation"}
       aria-label="Project navigation"
     >
-      <div className="sidebar-section-heading">
-        <span>Your projects</span>
-      </div>
+      <button
+        className="new-project-button"
+        onClick={() => {
+          const projectId = createConversation();
+          if (projectId && landing) setLandingSidebarOpen(false);
+        }}
+      >
+        <Plus size={15} />
+        <span>New project</span>
+      </button>
 
       <div className="history-heading">
         <div className="sidebar-section-heading">
@@ -1545,12 +1630,25 @@ export default function Home() {
                   ) : (
                     <div className="static-preview-shell" key={previewVersion}>
                       <div className="static-preview-notice" role="status">
-                        HTML snapshot preview <span>Next.js server routes, actions, and backend integrations aren’t running here.</span>
+                        {previewStatus === "ready"
+                          ? "Full-stack Next.js preview"
+                          : previewStatus === "error"
+                            ? "Full-stack preview unavailable"
+                            : "Starting isolated Cloudflare preview"}
+                        <span>
+                          {previewStatus === "ready"
+                            ? "Running in a per-project Container; outbound network access is restricted."
+                            : previewStatus === "error"
+                              ? `${previewError} Showing the HTML snapshot instead.`
+                              : "The HTML snapshot remains visible while the Container starts."}
+                        </span>
                       </div>
                       <iframe
-                        title="HTML snapshot preview"
-                        srcDoc={keepPreviewNavigationLocal(previewCode)}
-                        sandbox="allow-scripts allow-forms"
+                        key={`${previewStatus}-${previewVersion}-${activeId}`}
+                        title={previewStatus === "ready" ? "Full-stack app preview" : "HTML snapshot preview"}
+                        src={previewStatus === "ready" ? previewUrl : undefined}
+                        srcDoc={previewStatus === "ready" ? undefined : keepPreviewNavigationLocal(previewCode)}
+                        sandbox={previewStatus === "ready" ? "allow-scripts allow-forms allow-same-origin" : "allow-scripts allow-forms"}
                         className="preview-frame"
                       />
                     </div>
@@ -1587,7 +1685,13 @@ export default function Home() {
           <div className="workbench-footer">
             <span>
               <span className="live-dot" />
-              {activeConversation?.html ? "HTML snapshot ready" : isSending ? "Preparing preview…" : "Waiting for your first build"}
+              {activeConversation?.html
+                ? previewStatus === "ready"
+                  ? "Cloudflare Container preview ready"
+                  : previewStatus === "error"
+                    ? "Preview unavailable — showing HTML snapshot"
+                    : "Starting Cloudflare Container…"
+                : isSending ? "Preparing preview…" : "Waiting for your first build"}
             </span>
             <span><Clock3 size={12} />{activeConversation?.updatedAt ? `Updated ${formatTime(activeConversation.updatedAt)}` : "No build yet"}</span>
             <span className="footer-spacer" />
@@ -1614,9 +1718,8 @@ export default function Home() {
                   id="auth-password"
                   type={showPassword ? "text" : "password"}
                   autoComplete={authMode === "signin" ? "current-password" : "new-password"}
-                  minLength={authMode === "signup" ? 12 : undefined}
                   required
-                  placeholder={authMode === "signup" ? "At least 12 characters" : "Your password"}
+                  placeholder="Your password"
                   value={authPassword}
                   onChange={(event) => setAuthPassword(event.target.value)}
                 />

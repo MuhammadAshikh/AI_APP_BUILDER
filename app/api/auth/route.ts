@@ -77,9 +77,6 @@ export async function POST(request: Request) {
   }
 
   const isSignup = body.action === "signup";
-  if (isSignup && password.length < 12) {
-    return NextResponse.json({ error: "Use a password with at least 12 characters." }, { status: 400 });
-  }
   if (!password) {
     return NextResponse.json({ error: "Enter your password." }, { status: 400 });
   }
