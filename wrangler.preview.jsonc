@@ -17,7 +17,6 @@
     {
       "class_name": "PreviewContainer",
       "scheduling_policy": "durable_object",
-      "max_instances": 20,
       "images": {
         "base": {
           "dockerfile": "./preview-worker/Dockerfile"
@@ -33,12 +32,6 @@
       }
     ]
   },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["PreviewContainer"]
-    }
-  ],
   "exports": {
     "PreviewContainer": {
       "type": "durable-object",
